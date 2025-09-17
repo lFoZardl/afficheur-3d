@@ -1,11 +1,16 @@
 const std = @import("std");
 
 //.x .y .z
-pub fn Vec(taille_: usize, type_: type) type {
+pub fn Vec(type_: type, taille_: usize) type {
     return struct {
         const Self = @This();
 
         data: [taille_]type_,
+
+        pub fn at(self: *Self, index: usize) *type_ {
+            std.debug.assert(index < taille_);
+            return &self.data[index];
+        }
 
         pub fn x(self: *Self) *f32 {
             if (taille_ < 1) @compileError("Pas de champ .x dans un Vec");
@@ -94,23 +99,23 @@ pub fn Vec(taille_: usize, type_: type) type {
     };
 }
 
-export const Vec2 = Vec(2, f32);
-export const Vec3 = Vec(3, f32);
-export const Vec4 = Vec(4, f32);
+pub const Vec2 = Vec(f32, 2);
+pub const Vec3 = Vec(f32, 3);
+pub const Vec4 = Vec(f32, 4);
 
-export const Dvec2 = Vec(2, f64);
-export const Dvec3 = Vec(3, f64);
-export const Dvec4 = Vec(4, f64);
+pub const Dvec2 = Vec(f64, 2);
+pub const Dvec3 = Vec(f64, 3);
+pub const Dvec4 = Vec(f64, 4);
 
-export const Ivec2 = Vec(2, i32);
-export const Ivec3 = Vec(3, i32);
-export const Ivec4 = Vec(4, i32);
+pub const Ivec2 = Vec(i32, 2);
+pub const Ivec3 = Vec(i32, 3);
+pub const Ivec4 = Vec(i32, 4);
 
-export const Uvec2 = Vec(2, u32);
-export const Uvec3 = Vec(3, u32);
-export const Uvec4 = Vec(4, u32);
+pub const Uvec2 = Vec(u32, 2);
+pub const Uvec3 = Vec(u32, 3);
+pub const Uvec4 = Vec(u32, 4);
 
-pub fn Mat(taille_i: usize, taille_j: usize, type_: type) type {
+pub fn Mat(type_: type, taille_i: usize, taille_j: usize) type {
     return struct {
         const Self = @This();
 
