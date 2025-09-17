@@ -22,28 +22,49 @@ const Application = struct {
         GlfwInit,
         CreationFenetre,
         GlfwGetRequiredInstanceExtensions,
+        EnumerateInstanceExtensionProperties,
+        EnumerateInstanceLayerProperties,
     };
 
     pub fn getInstanceExtensions(self: Self) !std.ArrayList(vk.ExtensionProperties) {
         var nb_extensions: u32 = undefined;
-        const resultat1 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, null) catch {
-            return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        const resultat1 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, null) catch |err| {
+            return err;
         };
-        if (resultat1 != .success) return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        if (resultat1 != .success) return Self.Erreur.EnumerateInstanceExtensionProperties;
 
         var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, nb_extensions);
         errdefer list.deinit(allocator);
 
-        const resultat2 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch {
-            return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        const resultat2 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch |err| {
+            return err;
         };
-        if (resultat2 != .success) return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        if (resultat2 != .success) return Self.Erreur.EnumerateInstanceExtensionProperties;
 
         list.items.len = nb_extensions;
         return list;
     }
 
-    pub fn init() Self.Erreur!Self {
+    pub fn getInstanceLayers(self: Self) !std.ArrayList(vk.LayerProperties) {
+        var nb_layers: u32 = undefined;
+        const resultat1 = self.vkb.enumerateInstanceLayerProperties(&nb_layers, null) catch |err| {
+            return err;
+        };
+        if (resultat1 != .success) return Self.Erreur.EnumerateInstanceLayerProperties;
+
+        var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, nb_layers);
+        errdefer list.deinit(allocator);
+
+        const resultat2 = self.vkb.enumerateInstanceLayerProperties(&nb_layers, @ptrCast(list.items)) catch |err| {
+            return err;
+        };
+        if (resultat2 != .success) return Self.Erreur.EnumerateInstanceLayerProperties;
+
+        list.items.len = nb_layers;
+        return list;
+    }
+
+    pub fn init() !Self {
         if (c.glfwInit() == 0) {
             return Erreur.GlfwInit;
         }
@@ -125,5 +146,11 @@ pub fn main() !void {
         std.debug.print("\t{s}\n", .{extension.extension_name});
     }
 
+    var list_layers = try app.getInstanceLayers();
+    defer list_layers.deinit(allocator);
+
+    for (list_layers.items) |layer| {
+        std.debug.print("\t{s}\n", .{layer.layer_name});
+    }
     app.run();
 }
