@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
+const allocator = std.heap.page_allocator;
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
@@ -22,6 +23,25 @@ const Application = struct {
         CreationFenetre,
         GlfwGetRequiredInstanceExtensions,
     };
+
+    pub fn getInstanceExtensions(self: Self) !std.ArrayList(vk.ExtensionProperties) {
+        var nb_extensions: u32 = undefined;
+        const resultat1 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, null) catch {
+            return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        };
+        if (resultat1 != .success) return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+
+        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, nb_extensions);
+        errdefer list.deinit(allocator);
+
+        const resultat2 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch {
+            return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+        };
+        if (resultat2 != .success) return Self.Erreur.GlfwGetRequiredInstanceExtensions;
+
+        list.items.len = nb_extensions;
+        return list;
+    }
 
     pub fn init() Self.Erreur!Self {
         if (c.glfwInit() == 0) {
@@ -68,6 +88,7 @@ const Application = struct {
             .instance = instance,
         };
     }
+
     pub fn deinit(self: *Self) void {
         if (self.instance != .null_handle) self.vki.destroyInstance(self.instance, null);
         c.glfwDestroyWindow(self.fenetre);
@@ -95,7 +116,14 @@ pub fn main() !void {
         std.debug.print("Erreur\n", .{});
         return error.Unknown;
     };
+    defer app.deinit();
 
-    defer Application.deinit(&app); //defer app.deinit();
-    Application.run(&app); //app.run();
+    var list_extensions = try app.getInstanceExtensions();
+    defer list_extensions.deinit(allocator);
+
+    for (list_extensions.items) |extension| {
+        std.debug.print("\t{s}\n", .{extension.extension_name});
+    }
+
+    app.run();
 }
