@@ -10,6 +10,8 @@ const vk = @import("vulkan");
 
 const math = @import("maths.zig");
 
+const debugVulkan = true;
+
 const Application = struct {
     const Self = @This();
 
@@ -17,6 +19,7 @@ const Application = struct {
     vkb: vk.BaseWrapper = undefined,
     vki: vk.InstanceWrapper = undefined,
     instance: vk.Instance = vk.Instance.null_handle,
+    debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
 
     const Erreur = vk.BaseWrapper.CreateInstanceError || error{
         GlfwInit,
@@ -27,8 +30,11 @@ const Application = struct {
     };
 
     pub fn getInstanceExtensions(self: Self) !std.ArrayList(vk.ExtensionProperties) {
+        return enumerateExtensions(self.vkb);
+    }
+    pub fn enumerateExtensions(vkb: vk.BaseWrapper) !std.ArrayList(vk.ExtensionProperties) {
         var nb_extensions: u32 = undefined;
-        const resultat1 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, null) catch |err| {
+        const resultat1 = vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, null) catch |err| {
             return err;
         };
         if (resultat1 != .success) return Self.Erreur.EnumerateInstanceExtensionProperties;
@@ -36,7 +42,7 @@ const Application = struct {
         var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, nb_extensions);
         errdefer list.deinit(allocator);
 
-        const resultat2 = self.vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch |err| {
+        const resultat2 = vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch |err| {
             return err;
         };
         if (resultat2 != .success) return Self.Erreur.EnumerateInstanceExtensionProperties;
@@ -46,8 +52,11 @@ const Application = struct {
     }
 
     pub fn getInstanceLayers(self: Self) !std.ArrayList(vk.LayerProperties) {
+        return enumerateLayers(self.vkb);
+    }
+    fn enumerateLayers(vkb: vk.BaseWrapper) !std.ArrayList(vk.LayerProperties) {
         var nb_layers: u32 = undefined;
-        const resultat1 = self.vkb.enumerateInstanceLayerProperties(&nb_layers, null) catch |err| {
+        const resultat1 = vkb.enumerateInstanceLayerProperties(&nb_layers, null) catch |err| {
             return err;
         };
         if (resultat1 != .success) return Self.Erreur.EnumerateInstanceLayerProperties;
@@ -55,13 +64,72 @@ const Application = struct {
         var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, nb_layers);
         errdefer list.deinit(allocator);
 
-        const resultat2 = self.vkb.enumerateInstanceLayerProperties(&nb_layers, @ptrCast(list.items)) catch |err| {
+        const resultat2 = vkb.enumerateInstanceLayerProperties(&nb_layers, @ptrCast(list.items)) catch |err| {
             return err;
         };
         if (resultat2 != .success) return Self.Erreur.EnumerateInstanceLayerProperties;
 
         list.items.len = nb_layers;
         return list;
+    }
+
+    fn debugCallback(msg_severite: vk.DebugUtilsMessageSeverityFlagsEXT, msg_type: vk.DebugUtilsMessageTypeFlagsEXT, p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT, _: ?*anyopaque) callconv(vk.vulkan_call_conv) vk.Bool32 {
+        assert(p_callback_data != null);
+        const str_couleur_fin = "\x1B[39m";
+        const str_couleur_debut =
+            if (msg_severite.verbose_bit_ext)
+                "VERBOSE"
+            else if (msg_severite.info_bit_ext)
+                "\x1B[36mINFO"
+            else if (msg_severite.warning_bit_ext)
+                "\x1B[33mWARNING"
+            else if (msg_severite.error_bit_ext)
+                "\x1B[31mERROR"
+            else
+                "[UNKNOWN SEVERITY]\n\t";
+        const str_type =
+            if (msg_type.general_bit_ext)
+                "general"
+            else if (msg_type.validation_bit_ext)
+                "validation"
+            else if (msg_type.performance_bit_ext)
+                "performance"
+            else if (msg_type.device_address_binding_bit_ext)
+                "device_address_binding"
+            else
+                "[UNKOWN TYPE]";
+
+        std.log.debug(
+            "\x1B[1;4m{s}" ++
+                " {s}\x1B[22;24m\n\t" ++
+                "\x1B[3m{s}\x1B[23m" ++
+                str_couleur_fin,
+            .{
+                str_couleur_debut,
+                str_type,
+                p_callback_data.?.p_message.?,
+            },
+        );
+
+        return vk.Bool32.false;
+    }
+
+    fn populateDebugMessengerCreateInfo(create_info: *vk.DebugUtilsMessengerCreateInfoEXT) void {
+        create_info.* = .{
+            .flags = .{},
+            .message_severity = .{
+                .verbose_bit_ext = true,
+                .warning_bit_ext = true,
+                .error_bit_ext = true,
+            },
+            .message_type = .{
+                .general_bit_ext = true,
+                .validation_bit_ext = true,
+                .performance_bit_ext = true,
+            },
+            .pfn_user_callback = debugCallback,
+            .p_user_data = null,
+        };
     }
 
     pub fn init() !Self {
@@ -89,14 +157,25 @@ const Application = struct {
         var glfw_n_extensions: u32 = undefined;
         const glfw_extensions_c = c.glfwGetRequiredInstanceExtensions(&glfw_n_extensions) orelse return Self.Erreur.GlfwGetRequiredInstanceExtensions;
         const glfw_extensions: ?[*]const [*:0]const u8 = @ptrCast(glfw_extensions_c);
-        const create_info = vk.InstanceCreateInfo{
+
+        var create_info = vk.InstanceCreateInfo{
             .flags = .{},
             .p_application_info = &app_info,
             .enabled_layer_count = 0,
-            .pp_enabled_layer_names = undefined,
+            .pp_enabled_layer_names = null,
             .enabled_extension_count = glfw_n_extensions,
             .pp_enabled_extension_names = glfw_extensions,
         };
+
+        var debug_create_info: vk.DebugUtilsMessengerCreateInfoEXT = undefined;
+        if (debugVulkan) {
+            const validation_layers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
+            create_info.enabled_layer_count = validation_layers.len;
+            create_info.pp_enabled_layer_names = &validation_layers;
+
+            populateDebugMessengerCreateInfo(&debug_create_info);
+            create_info.p_next = &debug_create_info;
+        }
 
         const instance = try vkb.createInstance(&create_info, null);
         const vki = vk.InstanceWrapper.load(instance, vk_proc);
@@ -111,7 +190,11 @@ const Application = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        if (self.instance != .null_handle) self.vki.destroyInstance(self.instance, null);
+        if (debugVulkan and self.debug_messenger != .null_handle) {
+            self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
+        }
+        assert(self.instance != .null_handle);
+        self.vki.destroyInstance(self.instance, null);
         c.glfwDestroyWindow(self.fenetre);
         c.glfwTerminate();
     }
@@ -148,7 +231,6 @@ pub fn main() !void {
 
     var list_layers = try app.getInstanceLayers();
     defer list_layers.deinit(allocator);
-
     for (list_layers.items) |layer| {
         std.debug.print("\t{s}\n", .{layer.layer_name});
     }
