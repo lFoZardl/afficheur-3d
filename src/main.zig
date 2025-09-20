@@ -17,7 +17,7 @@ const debugVulkan = true;
 const Application = struct {
     const Self = @This();
 
-    fenetre: *c.GLFWwindow,
+    fenetre: *glfw.Window,
     vkb: vk.BaseWrapper = undefined,
     vki: vk.InstanceWrapper = undefined,
     instance: vk.Instance = vk.Instance.null_handle,
@@ -147,17 +147,17 @@ const Application = struct {
     }
 
     pub fn init() !Self {
-        if (c.glfwInit() == 0) {
+        if (glfw.init() == 0) {
             return Erreur.GlfwInit;
         }
 
-        const fenetre = c.glfwCreateWindow(200, 200, "allo", null, null) orelse {
+        const fenetre = glfw.Window.create(200, 200, "allo", null, null) catch {
             std.debug.print("fen invalide\n", .{});
             return Erreur.CreationFenetre;
         };
 
         //déb vk
-        const vk_proc: *const fn (instance: vk.Instance, procname: [*:0]const u8) callconv(.c) vk.PfnVoidFunction = @ptrCast(&c.glfwGetInstanceProcAddress);
+        const vk_proc: *const fn (instance: vk.Instance, procname: [*:0]const u8) callconv(.c) vk.PfnVoidFunction = @ptrCast(&glfw.getInstanceProcAddress);
         const vkb = vk.BaseWrapper.load(vk_proc);
 
         const app_info = vk.ApplicationInfo{
@@ -208,21 +208,21 @@ const Application = struct {
         }
         assert(self.instance != .null_handle);
         self.vki.destroyInstance(self.instance, null);
-        c.glfwDestroyWindow(self.fenetre);
-        c.glfwTerminate();
+        self.fenetre.destroy();
+        glfw.terminate();
     }
 
     pub fn step(self: *Self) void {
         std.Thread.sleep(std.time.ns_per_s / 60);
 
-        c.glfwSwapBuffers(self.fenetre);
+        self.fenetre.swapBuffers();
 
-        c.glfwPollEvents();
+        glfw.pollEvents();
     }
 
     pub fn run(self: *Self) void {
-        c.glfwMakeContextCurrent(self.fenetre);
-        while (c.glfwWindowShouldClose(self.fenetre) == 0) {
+        self.fenetre.makeContextCurrent();
+        while (!self.fenetre.shouldClose()) {
             self.step();
         }
     }
