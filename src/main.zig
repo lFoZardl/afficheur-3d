@@ -9,6 +9,7 @@ const c = @cImport({
 const vk = @import("vulkan");
 
 const glfw = @import("glfw.zig");
+const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
 
 const debugVulkan = true;
@@ -78,11 +79,11 @@ const Application = struct {
         assert(p_callback_data != null);
         const str_couleur_debut =
             if (msg_severite.error_bit_ext)
-                "\x1B[31mERROR"
+                terminal.Color.red ++ "ERROR"
             else if (msg_severite.warning_bit_ext)
-                "\x1B[33mWARNING"
+                terminal.Color.yellow ++ "WARNING" //"\x1B[33mWARNING"
             else if (msg_severite.info_bit_ext)
-                "\x1B[36mINFO"
+                terminal.Color.cyan ++ "INFO"
             else if (msg_severite.verbose_bit_ext)
                 "VERBOSE"
             else
@@ -100,10 +101,10 @@ const Application = struct {
                 "[UNKOWN TYPE]";
 
         std.log.debug(
-            "\x1B[1;4m{s}" ++
-                " {s}\x1B[22;24m\n\t" ++
-                "\x1B[3m{s}\x1B[23m" ++
-                "\x1B[39m",
+            terminal.Set.bold ++ terminal.Set.underline ++ "{s}" ++
+                " {s}\n\t" ++ terminal.Reset.bold ++ terminal.Reset.underline ++
+                terminal.Set.italic ++ "{s}" ++ terminal.Reset.italic ++
+                terminal.Color.default,
             .{
                 str_couleur_debut,
                 str_type,
