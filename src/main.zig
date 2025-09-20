@@ -1,6 +1,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
-const allocator = std.heap.page_allocator;
+const gpa = std.heap.page_allocator;
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
@@ -8,6 +8,7 @@ const c = @cImport({
 });
 const vk = @import("vulkan");
 
+const glfw = @import("glfw.zig");
 const math = @import("maths.zig");
 
 const debugVulkan = true;
@@ -39,8 +40,8 @@ const Application = struct {
         };
         if (resultat1 != .success) return Self.Erreur.EnumerateInstanceExtensionProperties;
 
-        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, nb_extensions);
-        errdefer list.deinit(allocator);
+        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(gpa, nb_extensions);
+        errdefer list.deinit(gpa);
 
         const resultat2 = vkb.enumerateInstanceExtensionProperties(null, &nb_extensions, @ptrCast(list.items)) catch |err| {
             return err;
@@ -61,8 +62,8 @@ const Application = struct {
         };
         if (resultat1 != .success) return Self.Erreur.EnumerateInstanceLayerProperties;
 
-        var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, nb_layers);
-        errdefer list.deinit(allocator);
+        var list = try std.ArrayList(vk.LayerProperties).initCapacity(gpa, nb_layers);
+        errdefer list.deinit(gpa);
 
         const resultat2 = vkb.enumerateInstanceLayerProperties(&nb_layers, @ptrCast(list.items)) catch |err| {
             return err;
@@ -75,16 +76,15 @@ const Application = struct {
 
     fn debugCallback(msg_severite: vk.DebugUtilsMessageSeverityFlagsEXT, msg_type: vk.DebugUtilsMessageTypeFlagsEXT, p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT, _: ?*anyopaque) callconv(vk.vulkan_call_conv) vk.Bool32 {
         assert(p_callback_data != null);
-        const str_couleur_fin = "\x1B[39m";
         const str_couleur_debut =
-            if (msg_severite.verbose_bit_ext)
-                "VERBOSE"
-            else if (msg_severite.info_bit_ext)
-                "\x1B[36mINFO"
+            if (msg_severite.error_bit_ext)
+                "\x1B[31mERROR"
             else if (msg_severite.warning_bit_ext)
                 "\x1B[33mWARNING"
-            else if (msg_severite.error_bit_ext)
-                "\x1B[31mERROR"
+            else if (msg_severite.info_bit_ext)
+                "\x1B[36mINFO"
+            else if (msg_severite.verbose_bit_ext)
+                "VERBOSE"
             else
                 "[UNKNOWN SEVERITY]\n\t";
         const str_type =
@@ -103,7 +103,7 @@ const Application = struct {
             "\x1B[1;4m{s}" ++
                 " {s}\x1B[22;24m\n\t" ++
                 "\x1B[3m{s}\x1B[23m" ++
-                str_couleur_fin,
+                "\x1B[39m",
             .{
                 str_couleur_debut,
                 str_type,
@@ -132,6 +132,19 @@ const Application = struct {
         };
     }
 
+    fn getRequiredExtensions(allocator: std.mem.Allocator) !std.ArrayList([*:0]const u8) {
+        const glfw_extensions = try glfw.getRequiredInstanceExtensions();
+        var list = try std.ArrayList([*:0]const u8).initCapacity(allocator, glfw_extensions.len);
+
+        // ajouter les extensions GLFW dans la liste
+        try list.appendSlice(gpa, glfw_extensions);
+
+        if (debugVulkan) {
+            try list.append(allocator, vk.extensions.ext_debug_utils.name);
+        }
+        return list;
+    }
+
     pub fn init() !Self {
         if (c.glfwInit() == 0) {
             return Erreur.GlfwInit;
@@ -154,17 +167,16 @@ const Application = struct {
             .api_version = @bitCast(vk.API_VERSION_1_2),
         };
 
-        var glfw_n_extensions: u32 = undefined;
-        const glfw_extensions_c = c.glfwGetRequiredInstanceExtensions(&glfw_n_extensions) orelse return Self.Erreur.GlfwGetRequiredInstanceExtensions;
-        const glfw_extensions: ?[*]const [*:0]const u8 = @ptrCast(glfw_extensions_c);
+        var extensions = try getRequiredExtensions(gpa);
+        defer extensions.deinit(gpa);
 
         var create_info = vk.InstanceCreateInfo{
             .flags = .{},
             .p_application_info = &app_info,
             .enabled_layer_count = 0,
             .pp_enabled_layer_names = null,
-            .enabled_extension_count = glfw_n_extensions,
-            .pp_enabled_extension_names = glfw_extensions,
+            .enabled_extension_count = @intCast(extensions.items.len),
+            .pp_enabled_extension_names = extensions.items.ptr,
         };
 
         var debug_create_info: vk.DebugUtilsMessengerCreateInfoEXT = undefined;
@@ -223,14 +235,14 @@ pub fn main() !void {
     defer app.deinit();
 
     var list_extensions = try app.getInstanceExtensions();
-    defer list_extensions.deinit(allocator);
+    defer list_extensions.deinit(gpa);
 
     for (list_extensions.items) |extension| {
         std.debug.print("\t{s}\n", .{extension.extension_name});
     }
 
     var list_layers = try app.getInstanceLayers();
-    defer list_layers.deinit(allocator);
+    defer list_layers.deinit(gpa);
     for (list_layers.items) |layer| {
         std.debug.print("\t{s}\n", .{layer.layer_name});
     }
