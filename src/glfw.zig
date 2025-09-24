@@ -99,7 +99,13 @@ pub const Monitor = opaque {
 pub const Window = opaque {
     const Self = @This();
 
-    pub fn create(width: i32, height: i32, title: [*:0]const u8, monitor: ?*Monitor, share: ?*Self) !*Self {
+    pub fn create(
+        width: i32,
+        height: i32,
+        title: [*:0]const u8,
+        monitor: ?*Monitor,
+        share: ?*Self,
+    ) !*Self {
         return @ptrCast(
             c.glfwCreateWindow(width, height, title, @ptrCast(monitor), @ptrCast(share)) orelse return error.Unknown,
         );
@@ -138,7 +144,13 @@ pub const Window = opaque {
         c.glfwGetWindowSize(@ptrCast(self), &xpos, &ypos);
         return .{ .x = xpos, .y = ypos };
     }
-    pub fn setSizeLimits(self: *Self, minwidth: i32, minheight: i32, maxwidth: i32, maxheight: i32) void {
+    pub fn setSizeLimits(
+        self: *Self,
+        minwidth: i32,
+        minheight: i32,
+        maxwidth: i32,
+        maxheight: i32,
+    ) void {
         return c.glfwSetWindowSizeLimits(@ptrCast(self), minwidth, minheight, maxwidth, maxheight);
     }
     pub fn setAspectRatio(self: *Self, numer: i32, denom: i32) void {
@@ -199,7 +211,15 @@ pub const Window = opaque {
     pub fn glfwGetWindowMonitor(self: *Self) ?*Monitor {
         return @ptrCast(c.glfwGetWindowMonitor(@ptrCast(self)));
     }
-    pub fn glfwSetWindowMonitor(self: *Self, monitor: ?*Monitor, xpos: i32, ypos: i32, width: i32, height: i32, refreshRate: i32) void {
+    pub fn glfwSetWindowMonitor(
+        self: *Self,
+        monitor: ?*Monitor,
+        xpos: i32,
+        ypos: i32,
+        width: i32,
+        height: i32,
+        refreshRate: i32,
+    ) void {
         assert(refreshRate >= -1);
         return c.glfwSetWindowMonitor(@ptrCast(self), @ptrCast(monitor), xpos, ypos, width, height, refreshRate);
     }

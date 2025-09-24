@@ -1,11 +1,19 @@
 const std = @import("std");
 
 //.x .y .z
-pub fn Vec(type_: type, taille_: usize) type {
-    return struct {
+pub fn Vec(comptime type_: type, comptime taille_: usize) type {
+    const ret = struct {
         const Self = @This();
 
-        data: [taille_]type_,
+        pub const Component =
+            if (taille_ == 2)
+                enum { x, y }
+            else if (taille_ == 3)
+                enum { x, y, z }
+            else if (taille_ == 4)
+                enum { x, y, z, w };
+
+        data: @Vector(taille_, type_),
 
         pub fn at(self: *Self, index: usize) *type_ {
             std.debug.assert(index < taille_);
@@ -32,44 +40,49 @@ pub fn Vec(type_: type, taille_: usize) type {
             return &self.data[3];
         }
 
-        pub fn add(self: Self, other: Self) Self {
-            var ret: Self = undefined;
-            for (self.data, other.data, &ret.data) |a, b, *r| {
-                r.* = a + b;
-            }
-            return ret;
+        pub inline fn add(self: Self, other: Self) Self {
+            return .{ .data = .{self.data + other.data} };
+            //var ret: Self = undefined;
+            //for (self.data, other.data, &ret.data) |a, b, *r| {
+            //    r.* = a + b;
+            //}
+            //return ret;
         }
 
-        pub fn sub(self: Self, other: Self) Self {
-            var ret: Self = undefined;
-            for (self.data, other.data, &ret.data) |a, b, *r| {
-                r.* = a - b;
-            }
-            return ret;
+        pub inline fn sub(self: Self, other: Self) Self {
+            return .{ .data = .{self.data - other.data} };
+            //var ret: Self = undefined;
+            //for (self.data, other.data, &ret.data) |a, b, *r| {
+            //    r.* = a - b;
+            //}
+            //return ret;
         }
 
         pub fn mul(self: Self, other: Self) Self {
-            var ret: Self = undefined;
-            for (self.data, other.data, &ret.data) |a, b, *r| {
-                r.* = a * b;
-            }
-            return ret;
+            return .{ .data = .{self.data * other.data} };
+            //var ret: Self = undefined;
+            //for (self.data, other.data, &ret.data) |a, b, *r| {
+            //    r.* = a * b;
+            //}
+            //return ret;
         }
 
         pub fn div(self: Self, other: Self) Self {
-            var ret: Self = undefined;
-            for (self.data, other.data, &ret.data) |a, b, *r| {
-                r.* = a / b;
-            }
-            return ret;
+            return .{ .data = .{self.data / other.data} };
+            //var ret: Self = undefined;
+            //for (self.data, other.data, &ret.data) |a, b, *r| {
+            //    r.* = a / b;
+            //}
+            //return ret;
         }
 
         pub fn dot(self: Self, other: Self) type_ {
-            var ret: type_ = 0;
-            for (self.data, other.data) |a, b| {
-                ret += a * b;
-            }
-            return ret;
+            return @reduce(.Add, self.data * other.data);
+            //var ret: type_ = 0;
+            //for (self.data, other.data) |a, b| {
+            //    ret += a * b;
+            //}
+            //return ret;
         }
 
         pub fn cross(self: Self, other: Self) Self {
@@ -87,6 +100,10 @@ pub fn Vec(type_: type, taille_: usize) type {
             return @sqrt(self.dot());
         }
 
+        pub fn length2(self: Self) type_ {
+            return self.dot(self);
+        }
+
         pub fn normalize(self: Self) Self {
             const len = self.length();
             std.debug.assert(len != 0);
@@ -97,6 +114,7 @@ pub fn Vec(type_: type, taille_: usize) type {
             return ret;
         }
     };
+    return ret;
 }
 
 pub const Vec2 = Vec(f32, 2);
