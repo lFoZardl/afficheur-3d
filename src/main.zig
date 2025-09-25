@@ -1,6 +1,7 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
-const gpa = std.heap.page_allocator;
+var gpa: std.mem.Allocator = undefined;
 
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
@@ -32,6 +33,7 @@ const Application = struct {
     instance: vk.Instance = vk.Instance.null_handle,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
     physical_device: vk.PhysicalDevice = .null_handle,
+    _arena: std.heap.ArenaAllocator,
 
     const Erreur = vk.BaseWrapper.CreateInstanceError || error{
         GlfwInit,
@@ -39,16 +41,16 @@ const Application = struct {
         GlfwGetRequiredInstanceExtensions,
     };
 
-    pub fn getInstanceExtensions(self: Self) !std.ArrayList(vk.ExtensionProperties) {
-        return enumerateExtensions(self.vkb);
+    pub fn getInstanceExtensions(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.ExtensionProperties) {
+        return enumerateExtensions(self.vkb, allocator);
     }
-    fn enumerateExtensions(vkb: vk.BaseWrapper) !std.ArrayList(vk.ExtensionProperties) {
+    fn enumerateExtensions(vkb: vk.BaseWrapper, allocator: std.mem.Allocator) !std.ArrayList(vk.ExtensionProperties) {
         var count: u32 = undefined;
         const resultat1 = try vkb.enumerateInstanceExtensionProperties(null, &count, null);
         if (resultat1 != .success) return error.Unknown;
 
-        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(gpa, count);
-        errdefer list.deinit(gpa);
+        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, count);
+        errdefer list.deinit(allocator);
 
         const resultat2 = try vkb.enumerateInstanceExtensionProperties(null, &count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
@@ -57,16 +59,16 @@ const Application = struct {
         return list;
     }
 
-    pub fn getInstanceLayers(self: Self) !std.ArrayList(vk.LayerProperties) {
-        return enumerateLayers(self.vkb);
+    pub fn getInstanceLayers(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.LayerProperties) {
+        return enumerateLayers(self.vkb, allocator);
     }
-    fn enumerateLayers(vkb: vk.BaseWrapper) !std.ArrayList(vk.LayerProperties) {
+    fn enumerateLayers(vkb: vk.BaseWrapper, allocator: std.mem.Allocator) !std.ArrayList(vk.LayerProperties) {
         var count: u32 = undefined;
         const resultat1 = try vkb.enumerateInstanceLayerProperties(&count, null);
         if (resultat1 != .success) return error.Unknown;
 
-        var list = try std.ArrayList(vk.LayerProperties).initCapacity(gpa, count);
-        errdefer list.deinit(gpa);
+        var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, count);
+        errdefer list.deinit(allocator);
 
         const resultat2 = try vkb.enumerateInstanceLayerProperties(&count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
@@ -75,13 +77,13 @@ const Application = struct {
         return list;
     }
 
-    fn enumeratePhysicalDevices(self: Self) !std.ArrayList(vk.PhysicalDevice) {
+    fn enumeratePhysicalDevices(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.PhysicalDevice) {
         var count: u32 = undefined;
         const resultat1 = try self.vki.enumeratePhysicalDevices(self.instance, &count, null);
         if (resultat1 != .success) return error.Unknown;
 
-        var list = try std.ArrayList(vk.PhysicalDevice).initCapacity(gpa, count);
-        errdefer list.deinit(gpa);
+        var list = try std.ArrayList(vk.PhysicalDevice).initCapacity(allocator, count);
+        errdefer list.deinit(allocator);
 
         const resultat2 = try self.vki.enumeratePhysicalDevices(self.instance, &count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
@@ -191,7 +193,7 @@ const Application = struct {
         var list = try std.ArrayList([*:0]const u8).initCapacity(allocator, glfw_extensions.len);
 
         // ajouter les extensions GLFW dans la liste
-        try list.appendSlice(gpa, glfw_extensions);
+        try list.appendSlice(allocator, glfw_extensions);
 
         if (debugVulkan) {
             try list.append(allocator, vk.extensions.ext_debug_utils.name);
@@ -199,14 +201,15 @@ const Application = struct {
         return list;
     }
 
-    fn findQueueFamilies(self: Self, device: vk.PhysicalDevice) !QueueFamilyIndices {
+    fn findQueueFamilies(self: *Self, device: vk.PhysicalDevice) !QueueFamilyIndices {
         var indices: QueueFamilyIndices = .{};
+        //var _string_buffer = self._string_buffer; // sert à faire .allocator() parce que ça prends un pointeur mut
 
         var queue_family_count: u32 = 0;
         self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
 
-        var queue_families = try std.ArrayList(vk.QueueFamilyProperties).initCapacity(gpa, queue_family_count);
-        defer queue_families.deinit(gpa);
+        var queue_families = try std.ArrayList(vk.QueueFamilyProperties).initCapacity(self._arena.allocator(), queue_family_count);
+        defer queue_families.deinit(self._arena.allocator());
         self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.items.ptr);
 
         for (queue_families.items, 0..) |queue_family, i| {
@@ -221,14 +224,14 @@ const Application = struct {
 
         return indices;
     }
-    fn isDeviceSuitable(self: Self, device: vk.PhysicalDevice) !bool {
+    fn isDeviceSuitable(self: *Self, device: vk.PhysicalDevice) !bool {
         const indices = try self.findQueueFamilies(device);
 
         return indices.isComplete();
     }
     fn pickPhysicalDevice(self: *Self) !void {
-        var devices = try self.enumeratePhysicalDevices();
-        defer devices.deinit(gpa);
+        var devices = try self.enumeratePhysicalDevices(self._arena.allocator());
+        defer devices.deinit(self._arena.allocator());
 
         for (devices.items) |device| {
             if (try self.isDeviceSuitable(device)) {
@@ -244,6 +247,7 @@ const Application = struct {
 
     pub fn init() !Self {
         var self: Self = undefined;
+        self._arena = .init(gpa);
         if (glfw.init() == 0) {
             return Erreur.GlfwInit;
         }
@@ -265,8 +269,8 @@ const Application = struct {
             .api_version = @bitCast(vk.API_VERSION_1_2),
         };
 
-        var extensions = try getRequiredExtensions(gpa);
-        defer extensions.deinit(gpa);
+        var extensions = try getRequiredExtensions(self._arena.allocator());
+        defer extensions.deinit(self._arena.allocator());
 
         var create_info = vk.InstanceCreateInfo{
             .flags = .{},
@@ -309,6 +313,7 @@ const Application = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        self._arena.deinit();
         //déb vk debug messenger
         if (debugVulkan and self.debug_messenger != .null_handle) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
@@ -341,21 +346,28 @@ const Application = struct {
 };
 
 pub fn main() !void {
+    var gpa_debug = std.heap.DebugAllocator(.{
+        //.verbose_log = true,
+        .safety = if (builtin.mode == .Debug) true,
+    }).init;
+    defer if (builtin.mode == .Debug) assert(gpa_debug.deinit() == .ok);
+    gpa = gpa_debug.allocator();
+
     var app = Application.init() catch {
         std.debug.print("Erreur\n", .{});
         return error.Unknown;
     };
     defer app.deinit();
 
-    var list_extensions = try app.getInstanceExtensions();
-    defer list_extensions.deinit(gpa);
+    var list_extensions = try app.getInstanceExtensions(app._arena.allocator());
+    defer list_extensions.deinit(app._arena.allocator());
 
     for (list_extensions.items) |extension| {
         std.debug.print("\t{s}\n", .{extension.extension_name});
     }
 
-    var list_layers = try app.getInstanceLayers();
-    defer list_layers.deinit(gpa);
+    var list_layers = try app.getInstanceLayers(app._arena.allocator());
+    defer list_layers.deinit(app._arena.allocator());
     for (list_layers.items) |layer| {
         std.debug.print("\t{s}\n", .{layer.layer_name});
     }
