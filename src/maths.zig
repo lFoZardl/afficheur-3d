@@ -1,8 +1,9 @@
 const std = @import("std");
+const expect = std.testing.expect;
 
 //.x .y .z
 pub fn Vec(comptime type_: type, comptime taille_: usize) type {
-    const ret = struct {
+    return struct {
         const Self = @This();
 
         pub const Component =
@@ -14,6 +15,14 @@ pub fn Vec(comptime type_: type, comptime taille_: usize) type {
                 enum { x, y, z, w };
 
         data: @Vector(taille_, type_),
+
+        pub fn new(data: @Vector(taille_, type_)) Self {
+            return .{ .data = data };
+        }
+
+        pub fn eql(self: Self, other: Self) bool {
+            return @reduce(.And, self.data == other.data);
+        }
 
         pub fn at(self: *Self, index: usize) *type_ {
             std.debug.assert(index < taille_);
@@ -41,48 +50,23 @@ pub fn Vec(comptime type_: type, comptime taille_: usize) type {
         }
 
         pub inline fn add(self: Self, other: Self) Self {
-            return .{ .data = .{self.data + other.data} };
-            //var ret: Self = undefined;
-            //for (self.data, other.data, &ret.data) |a, b, *r| {
-            //    r.* = a + b;
-            //}
-            //return ret;
+            return Self.new(self.data + other.data);
         }
 
         pub inline fn sub(self: Self, other: Self) Self {
-            return .{ .data = .{self.data - other.data} };
-            //var ret: Self = undefined;
-            //for (self.data, other.data, &ret.data) |a, b, *r| {
-            //    r.* = a - b;
-            //}
-            //return ret;
+            return Self.new(self.data - other.data);
         }
 
         pub fn mul(self: Self, other: Self) Self {
-            return .{ .data = .{self.data * other.data} };
-            //var ret: Self = undefined;
-            //for (self.data, other.data, &ret.data) |a, b, *r| {
-            //    r.* = a * b;
-            //}
-            //return ret;
+            return Self.new(self.data * other.data);
         }
 
         pub fn div(self: Self, other: Self) Self {
-            return .{ .data = .{self.data / other.data} };
-            //var ret: Self = undefined;
-            //for (self.data, other.data, &ret.data) |a, b, *r| {
-            //    r.* = a / b;
-            //}
-            //return ret;
+            return Self.new(self.data / other.data);
         }
 
         pub fn dot(self: Self, other: Self) type_ {
             return @reduce(.Add, self.data * other.data);
-            //var ret: type_ = 0;
-            //for (self.data, other.data) |a, b| {
-            //    ret += a * b;
-            //}
-            //return ret;
         }
 
         pub fn cross(self: Self, other: Self) Self {
@@ -114,7 +98,6 @@ pub fn Vec(comptime type_: type, comptime taille_: usize) type {
             return ret;
         }
     };
-    return ret;
 }
 
 pub const Vec2 = Vec(f32, 2);
@@ -147,4 +130,37 @@ pub fn Mat(type_: type, taille_i: usize, taille_j: usize) type {
         //    if (taille_i != 4 or taille_j != 4) @compileError("lootAt seulement pour matrices 4x4");
         //}
     };
+}
+
+pub fn mul(args: anytype) @typeInfo(@TypeOf(args)).@"struct".fields[0].type {
+    const ArgsType = @TypeOf(args);
+    const args_type_info = @typeInfo(ArgsType);
+    if (args_type_info != .@"struct") {
+        @compileError("expected tuple or struct argument, found " ++ @typeName(ArgsType));
+    }
+    const fields = args_type_info.@"struct".fields;
+    if (fields.len == 0) @compileError("tuple cannot be empty");
+    if (fields.len == 1) return fields[0];
+
+    const elements: [fields.len]fields[0].type = args;
+    var resultat = elements[0];
+    inline for (1..elements.len) |i| {
+        resultat = resultat.mul(elements[i]);
+    }
+    return resultat;
+}
+
+test "taille vecteur" {
+    // TODO erreur == 16. Je dois investiguer une manière d'avoir
+    // des vecteurs avec le bon packé comme du monde
+    //try expect(@sizeOf(Vec(u8, 4)) == 4);
+}
+
+test "multiplication de vecteur" {
+    const resultat: Vec4 = mul(.{
+        Vec4.new(.{ 1, 2, 3, -4 }),
+        Vec4.new(.{ 0, 1, 2, -4 }),
+        Vec4.new(.{ 3, 0.5, -1, 1 }),
+    });
+    try expect(resultat.eql(Vec4.new(.{ 0, 1, -6, 16 })));
 }
