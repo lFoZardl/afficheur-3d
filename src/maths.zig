@@ -291,5 +291,13 @@ test "matrice" {
         Vec4.new(.{ 0, 0, 0, 1 }),
     });
 
+    const c = Mat4.new(.{
+        Vec4.new(.{ 1, 0, 0, 0 }),
+        Vec4.new(.{ 0, 1, 0, 0 }),
+        Vec4.new(.{ 0, 0, 1, 0 }),
+        Vec4.new(.{ 1, 0, 0, 1 }),
+    });
+
     try expect(a.eql(b));
+    try expect(!c.eql(b));
 }
