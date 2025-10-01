@@ -2,6 +2,15 @@ const std = @import("std");
 const assert = std.debug.assert;
 const expect = std.testing.expect;
 
+pub fn epsilon(comptime T: type) T {
+    comptime return switch (T) {
+        f32 => 1.19209290e-7,
+        f64 => 2.2204460492503131e-16,
+        f128 => 1.08420217248550443401e-19,
+        else => unreachable,
+    };
+}
+
 //.x .y .z
 pub fn Vec(comptime type_: type, comptime taille_: usize) type {
     return struct {
@@ -97,6 +106,14 @@ pub fn Vec(comptime type_: type, comptime taille_: usize) type {
             return Self.new(a * b);
         }
 
+        pub fn scale(self: Self, factor: T) Self {
+            var ret: Self = undefined;
+            for (self.data, &ret.data) |from, *to| {
+                to.* = from * factor;
+            }
+            return ret;
+        }
+
         const componentMul = Self.mul;
 
         pub fn div(self: Self, other: Self) Self {
@@ -184,14 +201,6 @@ pub fn Mat(comptime type_: type, comptime taille_i_: usize, comptime taille_j_: 
         pub const dimensions: usize = 2;
 
         data: [taille_i]Vec(T, taille_j),
-
-        //pub fn perspective(fovy: T, aspect: T, zNear: T, zFar: T) Self{
-        //    if (taille_i != 4 or taille_j != 4) @compileError("perspective seulement pour matrices 4x4");
-        //}
-
-        //pub fn lookAt(eye: Vec3, center: Vec3, up: Vec3) Self{
-        //    if (taille_i != 4 or taille_j != 4) @compileError("lootAt seulement pour matrices 4x4");
-        //}
 
         pub const Iterator = struct {
             vec: *const Self,
@@ -331,6 +340,72 @@ pub fn Mat(comptime type_: type, comptime taille_i_: usize, comptime taille_j_: 
                 if (j != Self.taille_j - 1)
                     try writer.print("\n", .{});
             }
+        }
+
+        pub fn ortho(left: T, right: T, bottom: T, top: T, z_near: T, z_far: T) Self {
+            if (taille_i != 4 or taille_j != 4) @compileError("frustum seulement pour matrices 4x4");
+            return Self.new(.{
+                .new(.{ 2 / (right - left), 0, 0, 0 }),
+                .new(.{ 0, 2 / (top - bottom), 0, 0 }),
+                .new(.{ 0, 0, -2 / (z_far - z_near), 1 }),
+                .new(.{
+                    -(right + left) / (right - left),
+                    -(top + bottom) / (top - bottom),
+                    -(z_far + z_near) / (z_far - z_near),
+                    0,
+                }),
+            });
+        }
+
+        pub fn frustum(left: T, right: T, bottom: T, top: T, near_val: T, far_val: T) Self {
+            if (taille_i != 4 or taille_j != 4) @compileError("frustum seulement pour matrices 4x4");
+            return Self.new(.{
+                .new(.{ (2 * near_val) / (right - left), 0, 0, 0 }),
+                .new(.{ 0, (2 * near_val) / (top - bottom), 0, 0 }),
+                .new(.{ -(right + left) / (right - left), -(top + bottom) / (top - bottom), far_val / (far_val - near_val), 1 }),
+                .new(.{ 0, 0, -(far_val * near_val) / (far_val - near_val), 0 }),
+            });
+        }
+
+        pub fn perspective(fovy: T, aspect: T, zNear: T, zFar: T) Self {
+            if (taille_i != 4 or taille_j != 4) @compileError("perspective seulement pour matrices 4x4");
+            assert(@abs(aspect - epsilon(T)) > 0);
+
+            const tanHalfFovy: T = std.math.tan(fovy / 2);
+
+            return Self.new(.{
+                .new(.{ 1 / (aspect * tanHalfFovy), 0, 0, 0 }),
+                .new(.{ 0, 1 / tanHalfFovy, 0, 0 }),
+                .new(.{ 0, 0, zFar / (zFar - zNear), 1 }),
+                .new(.{ 0, 0, -(zFar * zNear) / (zFar - zNear), 0 }),
+            });
+        }
+
+        pub fn translate(self: Self, vec: anytype) Self {
+            if (taille_i != 4 or taille_j != 4 or @TypeOf(vec).taille != 3) {
+                @compileError("translate incompatible");
+            }
+            var ret = self;
+            ret.data[3] = (self.data[0].scale(vec.data[0]))
+                .add((self.data[1].scale(vec.data[1])))
+                .add((self.data[2].scale(vec.data[2])))
+                .add(self.data[3]);
+            return ret;
+        }
+
+        pub fn lookAt(eye: Vec3, center: Vec3, up: Vec3) Self {
+            if (taille_i != 4 or taille_j != 4) @compileError("lootAt seulement pour matrices 4x4");
+
+            const f = center.sub(up).normalize();
+            const s = f.cross(up).normalize();
+            const u = s.cross(f);
+
+            return Self.new(.{
+                .new(.{ s.x(), u.x(), -f.x(), 1 }),
+                .new(.{ s.y(), u.y(), -f.y(), 1 }),
+                .new(.{ s.z(), u.z(), -f.z(), 1 }),
+                .new(.{ -s.dot(eye), -u.dot(eye), f.dot(eye), 1 }),
+            });
         }
     };
 }
