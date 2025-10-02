@@ -14,26 +14,42 @@ const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
 
 const debugVulkan = true;
+const validation_layers: ?[]const [*:0]const u8 =
+    if (debugVulkan)
+        &.{"VK_LAYER_KHRONOS_validation"}
+    else
+        null;
 
 const QueueFamilyIndices = struct {
     const Self = @This();
     graphics_family: ?u32 = null,
+    present_family: ?u32 = null,
 
     fn isComplete(self: Self) bool {
-        return self.graphics_family != null;
+        return self.graphics_family != null and self.present_family != null;
     }
 };
 
 const Application = struct {
     const Self = @This();
 
-    fenetre: *glfw.Window,
+    fenetre: *glfw.Window = undefined,
+
     vkb: vk.BaseWrapper = undefined,
     vki: vk.InstanceWrapper = undefined,
+    vkd: vk.DeviceWrapper = undefined,
+
     instance: vk.Instance = vk.Instance.null_handle,
     debug_messenger: vk.DebugUtilsMessengerEXT = .null_handle,
+    surface: vk.SurfaceKHR = .null_handle,
+
     physical_device: vk.PhysicalDevice = .null_handle,
-    _arena: std.heap.ArenaAllocator,
+    device: vk.Device = .null_handle,
+
+    graphics_queue: vk.Queue = .null_handle,
+    present_queue: vk.Queue = .null_handle,
+
+    _arena: std.heap.ArenaAllocator = undefined,
 
     const Erreur = vk.BaseWrapper.CreateInstanceError || error{
         GlfwInit,
@@ -52,6 +68,7 @@ const Application = struct {
         var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, count);
         errdefer list.deinit(allocator);
 
+        list.items.len += count;
         const resultat2 = try vkb.enumerateInstanceExtensionProperties(null, &count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
 
@@ -70,6 +87,7 @@ const Application = struct {
         var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, count);
         errdefer list.deinit(allocator);
 
+        list.items.len += count;
         const resultat2 = try vkb.enumerateInstanceLayerProperties(&count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
 
@@ -85,6 +103,7 @@ const Application = struct {
         var list = try std.ArrayList(vk.PhysicalDevice).initCapacity(allocator, count);
         errdefer list.deinit(allocator);
 
+        list.items.len += count;
         const resultat2 = try self.vki.enumeratePhysicalDevices(self.instance, &count, @ptrCast(list.items));
         if (resultat2 != .success) return error.Unknown;
 
@@ -203,18 +222,22 @@ const Application = struct {
 
     fn findQueueFamilies(self: *Self, device: vk.PhysicalDevice) !QueueFamilyIndices {
         var indices: QueueFamilyIndices = .{};
-        //var _string_buffer = self._string_buffer; // sert à faire .allocator() parce que ça prends un pointeur mut
 
         var queue_family_count: u32 = 0;
         self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
 
         var queue_families = try std.ArrayList(vk.QueueFamilyProperties).initCapacity(self._arena.allocator(), queue_family_count);
         defer queue_families.deinit(self._arena.allocator());
+        queue_families.items.len += queue_family_count;
         self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.items.ptr);
 
         for (queue_families.items, 0..) |queue_family, i| {
             if (queue_family.queue_flags.graphics_bit) {
                 indices.graphics_family = @intCast(i);
+            }
+            const presentSupport = try self.vki.getPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), self.surface);
+            if (presentSupport == .true) {
+                indices.present_family = @intCast(i);
             }
 
             if (indices.isComplete()) {
@@ -233,6 +256,7 @@ const Application = struct {
         var devices = try self.enumeratePhysicalDevices(self._arena.allocator());
         defer devices.deinit(self._arena.allocator());
 
+        self.physical_device = .null_handle;
         for (devices.items) |device| {
             if (try self.isDeviceSuitable(device)) {
                 self.physical_device = device;
@@ -245,13 +269,61 @@ const Application = struct {
         }
     }
 
+    fn createLogicalDevice(self: *Self) !void {
+        assert(self.physical_device != .null_handle);
+        const indices = try self.findQueueFamilies(self.physical_device);
+
+        const queue_count = 1;
+        const priorites = [queue_count]f32{1};
+
+        var unique_families = std.AutoHashMap(u32, void).init(self._arena.allocator());
+        defer unique_families.deinit();
+
+        try unique_families.put(indices.graphics_family.?, {});
+        try unique_families.put(indices.present_family.?, {});
+
+        var queue_infos = try std.ArrayList(vk.DeviceQueueCreateInfo).initCapacity(self._arena.allocator(), unique_families.count());
+        defer queue_infos.deinit(self._arena.allocator());
+
+        var it = unique_families.iterator();
+        while (it.next()) |entry| {
+            try queue_infos.append(self._arena.allocator(), .{
+                .queue_family_index = entry.key_ptr.*,
+                .queue_count = queue_count,
+                .p_queue_priorities = &priorites,
+            });
+        }
+
+        const create_info = vk.DeviceCreateInfo{
+            .queue_create_info_count = @intCast(queue_infos.items.len),
+            .p_queue_create_infos = queue_infos.items.ptr,
+
+            // ces champs sont dépréciés. Les implémentations à jour devraient les ignorer
+            //.enabled_layer_count = validation_layers.len,
+            //.pp_enabled_layer_names = &validation_layers,
+        };
+
+        self.device = try self.vki.createDevice(self.physical_device, &create_info, null);
+        self.vkd = vk.DeviceWrapper.load(self.device, self.vki.dispatch.vkGetDeviceProcAddr.?);
+
+        self.graphics_queue = self.vkd.getDeviceQueue(self.device, indices.graphics_family.?, 0);
+        self.present_queue = self.vkd.getDeviceQueue(self.device, indices.present_family.?, 0);
+    }
+
+    pub fn createSurface(self: *Self) !void {
+        self.surface = try self.fenetre.createSurface(self.instance, null);
+    }
+
     pub fn init() !Self {
-        var self: Self = undefined;
+        var self: Self = .{};
         self._arena = .init(gpa);
+        errdefer self._arena.deinit();
         if (glfw.init() == 0) {
             return Erreur.GlfwInit;
         }
 
+        c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_FALSE);
         self.fenetre = glfw.Window.create(200, 200, "allo", null, null) catch {
             std.debug.print("fen invalide\n", .{});
             return Erreur.CreationFenetre;
@@ -273,19 +345,17 @@ const Application = struct {
         defer extensions.deinit(self._arena.allocator());
 
         var create_info = vk.InstanceCreateInfo{
-            .flags = .{},
             .p_application_info = &app_info,
-            .enabled_layer_count = 0,
-            .pp_enabled_layer_names = null,
+            .enabled_layer_count = 0, //if (validation_layers) |p| p.len else 0,
+            .pp_enabled_layer_names = null, //if (validation_layers) |p| p.ptr else null,
             .enabled_extension_count = @intCast(extensions.items.len),
             .pp_enabled_extension_names = extensions.items.ptr,
         };
 
         var debug_create_info: vk.DebugUtilsMessengerCreateInfoEXT = undefined;
-        if (debugVulkan) {
-            const validation_layers = [_][*:0]const u8{"VK_LAYER_KHRONOS_validation"};
-            create_info.enabled_layer_count = validation_layers.len;
-            create_info.pp_enabled_layer_names = &validation_layers;
+        if (validation_layers) |layers| {
+            create_info.enabled_layer_count = layers.len;
+            create_info.pp_enabled_layer_names = layers.ptr;
 
             populateDebugMessengerCreateInfo(&debug_create_info);
             create_info.p_next = &debug_create_info;
@@ -305,15 +375,30 @@ const Application = struct {
         }
         //fin vk debug messenger
 
-        //déb vk devices
+        //déb vk surface
+        try self.createSurface();
+        //fin vk surface
+
+        //déb vk physical devices
         try self.pickPhysicalDevice();
-        //fin vk devices
+        //fin vk physical devices
+
+        //déb vk logical devices
+        try self.createLogicalDevice();
+        //fin vk logical devices
 
         return self;
     }
 
     pub fn deinit(self: *Self) void {
-        self._arena.deinit();
+        //déb vk logical devices
+        self.vkd.destroyDevice(self.device, null);
+        //fin vk logical devices
+
+        //déb vk surface
+        self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        //fin vk surface
+
         //déb vk debug messenger
         if (debugVulkan and self.debug_messenger != .null_handle) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
@@ -327,6 +412,7 @@ const Application = struct {
 
         self.fenetre.destroy();
         glfw.terminate();
+        self._arena.deinit();
     }
 
     pub fn step(self: *Self) void {
@@ -353,9 +439,9 @@ pub fn main() !void {
     defer if (builtin.mode == .Debug) assert(gpa_debug.deinit() == .ok);
     gpa = gpa_debug.allocator();
 
-    var app = Application.init() catch {
-        std.debug.print("Erreur\n", .{});
-        return error.Unknown;
+    var app = Application.init() catch |e| {
+        std.debug.print("Erreur ({})\n", .{e});
+        return e;
     };
     defer app.deinit();
 

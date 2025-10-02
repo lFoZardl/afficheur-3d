@@ -250,6 +250,30 @@ pub const Window = opaque {
     pub fn swapBuffers(self: *Self) void {
         return c.glfwSwapBuffers(@ptrCast(self));
     }
+
+    pub fn createSurface(self: *Self, instance: vk.Instance, allocator: ?*const vk.AllocationCallbacks) !vk.SurfaceKHR {
+        var surface: vk.SurfaceKHR = undefined;
+        const resultat: vk.Result = @enumFromInt(c.glfwCreateWindowSurface(
+            @ptrFromInt(@intFromEnum(instance)),
+            @ptrCast(self),
+            @ptrCast(allocator),
+            @ptrCast(&surface),
+        ));
+
+        switch (resultat) {
+            vk.Result.success => {},
+            vk.Result.error_initialization_failed => return error.InitializationFailed,
+            vk.Result.error_extension_not_present => return error.ExtensionNotPresent,
+            vk.Result.error_native_window_in_use_khr => return error.NativeWindowInUseKHR,
+            vk.Result.error_unknown => return error.Unknown,
+            else => return error.Unknown,
+        }
+        if (surface == .null_handle) {
+            return error.Unknown;
+        }
+
+        return surface;
+    }
 };
 
 pub const Image = struct {
