@@ -61,54 +61,27 @@ const Application = struct {
         return enumerateExtensions(self.vkb, allocator);
     }
     fn enumerateExtensions(vkb: vk.BaseWrapper, allocator: std.mem.Allocator) !std.ArrayList(vk.ExtensionProperties) {
-        var count: u32 = undefined;
-        const resultat1 = try vkb.enumerateInstanceExtensionProperties(null, &count, null);
-        if (resultat1 != .success) return error.Unknown;
-
-        var list = try std.ArrayList(vk.ExtensionProperties).initCapacity(allocator, count);
-        errdefer list.deinit(allocator);
-
-        list.items.len += count;
-        const resultat2 = try vkb.enumerateInstanceExtensionProperties(null, &count, @ptrCast(list.items));
-        if (resultat2 != .success) return error.Unknown;
-
-        list.items.len = count;
-        return list;
+        const alloc_extensions = try vkb.enumerateInstanceExtensionPropertiesAlloc(null, allocator);
+        var list_extensions = std.ArrayList(vk.ExtensionProperties).fromOwnedSlice(alloc_extensions);
+        errdefer list_extensions.deinit(allocator);
+        return list_extensions;
     }
 
     pub fn getInstanceLayers(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.LayerProperties) {
         return enumerateLayers(self.vkb, allocator);
     }
     fn enumerateLayers(vkb: vk.BaseWrapper, allocator: std.mem.Allocator) !std.ArrayList(vk.LayerProperties) {
-        var count: u32 = undefined;
-        const resultat1 = try vkb.enumerateInstanceLayerProperties(&count, null);
-        if (resultat1 != .success) return error.Unknown;
-
-        var list = try std.ArrayList(vk.LayerProperties).initCapacity(allocator, count);
-        errdefer list.deinit(allocator);
-
-        list.items.len += count;
-        const resultat2 = try vkb.enumerateInstanceLayerProperties(&count, @ptrCast(list.items));
-        if (resultat2 != .success) return error.Unknown;
-
-        list.items.len = count;
-        return list;
+        const alloc_layers = try vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
+        var list_layers = std.ArrayList(vk.LayerProperties).fromOwnedSlice(alloc_layers);
+        errdefer list_layers.deinit(allocator);
+        return list_layers;
     }
 
     fn enumeratePhysicalDevices(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.PhysicalDevice) {
-        var count: u32 = undefined;
-        const resultat1 = try self.vki.enumeratePhysicalDevices(self.instance, &count, null);
-        if (resultat1 != .success) return error.Unknown;
-
-        var list = try std.ArrayList(vk.PhysicalDevice).initCapacity(allocator, count);
-        errdefer list.deinit(allocator);
-
-        list.items.len += count;
-        const resultat2 = try self.vki.enumeratePhysicalDevices(self.instance, &count, @ptrCast(list.items));
-        if (resultat2 != .success) return error.Unknown;
-
-        list.items.len = count;
-        return list;
+        const alloc_devices = try self.vki.enumeratePhysicalDevicesAlloc(self.instance, allocator);
+        var list_devices = std.ArrayList(vk.PhysicalDevice).fromOwnedSlice(alloc_devices);
+        errdefer list_devices.deinit(allocator);
+        return list_devices;
     }
 
     fn debugCallback(
@@ -223,15 +196,10 @@ const Application = struct {
     fn findQueueFamilies(self: *Self, device: vk.PhysicalDevice) !QueueFamilyIndices {
         var indices: QueueFamilyIndices = .{};
 
-        var queue_family_count: u32 = 0;
-        self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, null);
+        const queue_families = try self.vki.getPhysicalDeviceQueueFamilyPropertiesAlloc(device, self._arena.allocator());
+        defer self._arena.allocator().free(queue_families);
 
-        var queue_families = try std.ArrayList(vk.QueueFamilyProperties).initCapacity(self._arena.allocator(), queue_family_count);
-        defer queue_families.deinit(self._arena.allocator());
-        queue_families.items.len += queue_family_count;
-        self.vki.getPhysicalDeviceQueueFamilyProperties(device, &queue_family_count, queue_families.items.ptr);
-
-        for (queue_families.items, 0..) |queue_family, i| {
+        for (queue_families, 0..) |queue_family, i| {
             if (queue_family.queue_flags.graphics_bit) {
                 indices.graphics_family = @intCast(i);
             }
