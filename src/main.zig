@@ -20,6 +20,8 @@ const validation_layers: ?[]const [*:0]const u8 =
     else
         null;
 
+const device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
+
 const QueueFamilyIndices = struct {
     const Self = @This();
     graphics_family: ?u32 = null,
@@ -27,6 +29,18 @@ const QueueFamilyIndices = struct {
 
     fn isComplete(self: Self) bool {
         return self.graphics_family != null and self.present_family != null;
+    }
+};
+
+const SwapChainSupportDetails = struct {
+    const Self = @This();
+    capabilities: vk.SurfaceCapabilitiesKHR,
+    formats: std.ArrayList(vk.SurfaceFormatKHR),
+    present_modes: std.ArrayList(vk.PresentModeKHR),
+
+    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        self.formats.deinit(allocator);
+        self.present_modes.deinit(allocator);
     }
 };
 
@@ -48,6 +62,11 @@ const Application = struct {
 
     graphics_queue: vk.Queue = .null_handle,
     present_queue: vk.Queue = .null_handle,
+
+    swap_chain: vk.SwapchainKHR = .null_handle,
+    swap_chain_images: ?[]vk.Image = null,
+    swap_chain_image_format: vk.Format = .undefined,
+    swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -218,8 +237,135 @@ const Application = struct {
     fn isDeviceSuitable(self: *Self, device: vk.PhysicalDevice) !bool {
         const indices = try self.findQueueFamilies(device);
 
-        return indices.isComplete();
+        const extensions_supported = try self.checkDeviceExtensionSupport(device);
+        var swap_chain_adequate = false;
+        if (extensions_supported) {
+            var swap_chain_support = try self.querySwapChainSupport(device, self._arena.allocator());
+            defer swap_chain_support.deinit(self._arena.allocator());
+
+            swap_chain_adequate =
+                swap_chain_support.formats.items.len > 0 and
+                swap_chain_support.present_modes.items.len > 0;
+        }
+
+        return indices.isComplete() and extensions_supported and swap_chain_adequate;
     }
+
+    // déb fonctions pour swapchain
+    fn checkDeviceExtensionSupport(self: *Self, device: vk.PhysicalDevice) !bool {
+        const extensions_dispos = try self.vki.enumerateDeviceExtensionPropertiesAlloc(device, null, self._arena.allocator());
+        defer self._arena.allocator().free(extensions_dispos);
+
+        const required_extensions = device_extensions[0..];
+
+        for (required_extensions) |required_extension| {
+            for (extensions_dispos) |extensions_dispo| {
+                const len = std.mem.indexOfScalar(u8, &extensions_dispo.extension_name, 0).?;
+                const extensions_dispo_name = extensions_dispo.extension_name[0..len];
+                if (std.mem.eql(u8, std.mem.span(required_extension), extensions_dispo_name)) {
+                    break;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        return true;
+    }
+    fn querySwapChainSupport(self: *Self, device: vk.PhysicalDevice, allocator: std.mem.Allocator) !SwapChainSupportDetails {
+        assert(device != .null_handle);
+        assert(self.surface != .null_handle);
+        const surface_formats_alloc = try self.vki.getPhysicalDeviceSurfaceFormatsAllocKHR(device, self.surface, allocator);
+        const surface_present_modes_alloc = try self.vki.getPhysicalDeviceSurfacePresentModesAllocKHR(device, self.surface, allocator);
+
+        const details: SwapChainSupportDetails = .{
+            .capabilities = try self.vki.getPhysicalDeviceSurfaceCapabilitiesKHR(device, self.surface),
+            .formats = .fromOwnedSlice(surface_formats_alloc),
+            .present_modes = .fromOwnedSlice(surface_present_modes_alloc),
+        };
+
+        return details;
+    }
+    fn chooseSwapSurfaceFormat(formats: []const vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
+        assert(formats.len > 0);
+        for (formats) |available_format| {
+            if (available_format.format == .b8g8r8a8_srgb and available_format.color_space == .srgb_nonlinear_khr) {
+                return available_format;
+            }
+        }
+
+        return formats[0];
+    }
+    fn chooseSwapPresentMode(present_modes: []const vk.PresentModeKHR) vk.PresentModeKHR {
+        assert(present_modes.len > 0);
+        for (present_modes) |available_mode| {
+            if (available_mode == .mailbox_khr) {
+                return available_mode;
+            }
+        }
+
+        return present_modes[0];
+    }
+    fn chooseSwapExtent(self: *Self, capabilities: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
+        if (capabilities.current_extent.width != 0xFFFF_FFFF) {
+            return capabilities.current_extent;
+        } else {
+            const taille_framebuffer = self.fenetre.getFramebufferSize();
+            assert(taille_framebuffer.width > 0);
+            assert(taille_framebuffer.height > 0);
+
+            return vk.Extent2D{
+                .width = std.math.clamp(@as(u32, @intCast(taille_framebuffer.width)), capabilities.min_image_extent.width, capabilities.max_image_extent.width),
+                .height = std.math.clamp(@as(u32, @intCast(taille_framebuffer.height)), capabilities.min_image_extent.height, capabilities.max_image_extent.height),
+            };
+        }
+    }
+    fn createSwapChain(self: *Self) !void {
+        var swap_chain_support = try self.querySwapChainSupport(self.physical_device, self._arena.allocator());
+        defer swap_chain_support.deinit(self._arena.allocator());
+
+        const surface_format = chooseSwapSurfaceFormat(swap_chain_support.formats.items);
+        const present_mode = chooseSwapPresentMode(swap_chain_support.present_modes.items);
+        const extent = self.chooseSwapExtent(swap_chain_support.capabilities);
+
+        const nb_images =
+            if (swap_chain_support.capabilities.max_image_count > swap_chain_support.capabilities.min_image_count)
+                swap_chain_support.capabilities.min_image_count + 1
+            else
+                swap_chain_support.capabilities.min_image_count;
+
+        const indices = try self.findQueueFamilies(self.physical_device);
+        const queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
+        const sharing_mode: vk.SharingMode =
+            if (indices.graphics_family.? != indices.present_family.?)
+                .concurrent
+            else
+                .exclusive;
+
+        self.swap_chain = try self.vkd.createSwapchainKHR(self.device, &.{
+            .surface = self.surface,
+            .min_image_count = nb_images,
+            .image_format = surface_format.format,
+            .image_color_space = surface_format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{ .color_attachment_bit = true },
+            .image_sharing_mode = sharing_mode,
+            .queue_family_index_count = queue_family_indices.len,
+            .p_queue_family_indices = &queue_family_indices,
+            .pre_transform = swap_chain_support.capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = .true,
+        }, null);
+
+        self.swap_chain_images = try self.vkd.getSwapchainImagesAllocKHR(self.device, self.swap_chain, self._arena.allocator());
+
+        self.swap_chain_image_format = surface_format.format;
+        self.swap_chain_extent = extent;
+    }
+    // fin fonctions pour swapchain
+
     fn pickPhysicalDevice(self: *Self) !void {
         var devices = try self.enumeratePhysicalDevices(self._arena.allocator());
         defer devices.deinit(self._arena.allocator());
@@ -265,6 +411,9 @@ const Application = struct {
         const create_info = vk.DeviceCreateInfo{
             .queue_create_info_count = @intCast(queue_infos.items.len),
             .p_queue_create_infos = queue_infos.items.ptr,
+
+            .enabled_extension_count = device_extensions.len,
+            .pp_enabled_extension_names = &device_extensions,
 
             // ces champs sont dépréciés. Les implémentations à jour devraient les ignorer
             //.enabled_layer_count = validation_layers.len,
@@ -355,15 +504,28 @@ const Application = struct {
         try self.createLogicalDevice();
         //fin vk logical devices
 
+        // déb vk swap chain
+        try self.createSwapChain();
+        // fin vk swap chain
+
         return self;
     }
 
     pub fn deinit(self: *Self) void {
+        // déb vk swap chain
+        assert(self.swap_chain_images != null);
+        self._arena.allocator().free(self.swap_chain_images.?);
+        assert(self.swap_chain != .null_handle);
+        self.vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
+        // fin vk swap chain
+
         //déb vk logical devices
+        assert(self.device != .null_handle);
         self.vkd.destroyDevice(self.device, null);
         //fin vk logical devices
 
         //déb vk surface
+        assert(self.surface != .null_handle);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
         //fin vk surface
 
