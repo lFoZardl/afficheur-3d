@@ -67,6 +67,7 @@ const Application = struct {
     swap_chain_images: ?[]vk.Image = null,
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
+    swap_chain_image_views: std.ArrayList(vk.ImageView) = .empty,
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -431,6 +432,27 @@ const Application = struct {
         self.surface = try self.fenetre.createSurface(self.instance, null);
     }
 
+    fn createImageViews(self: *Self) !void {
+        try self.swap_chain_image_views.resize(self._arena.allocator(), self.swap_chain_images.?.len);
+
+        assert(self.swap_chain_images != null);
+        for (self.swap_chain_images.?, self.swap_chain_image_views.items) |image, *image_view| {
+            image_view.* = try self.vkd.createImageView(self.device, &.{
+                .image = image,
+                .view_type = .@"2d",
+                .format = self.swap_chain_image_format,
+                .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+                .subresource_range = .{
+                    .aspect_mask = .{ .color_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            }, null);
+        }
+    }
+
     pub fn init() !Self {
         var self: Self = .{};
         self._arena = .init(gpa);
@@ -508,10 +530,22 @@ const Application = struct {
         try self.createSwapChain();
         // fin vk swap chain
 
+        // déb vk image views
+        try self.createImageViews();
+        // fin vk image views
+
         return self;
     }
 
     pub fn deinit(self: *Self) void {
+        // déb vk image views
+        assert(self.swap_chain_image_views.items.len > 0);
+        for (self.swap_chain_image_views.items) |image_view| {
+            self.vkd.destroyImageView(self.device, image_view, null);
+        }
+        self.swap_chain_image_views.clearAndFree(self._arena.allocator());
+        // fin vk image views
+
         // déb vk swap chain
         assert(self.swap_chain_images != null);
         self._arena.allocator().free(self.swap_chain_images.?);
