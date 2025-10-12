@@ -62,7 +62,24 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    ////
+    // La documentation du système de build est inexistante lol.
+    const shaders = [_][]const u8{
+        "defaut.frag",
+        "defaut.vert",
+    };
+    for (shaders) |shader| {
+        var glslc = b.addSystemCommand(&.{"glslc"});
+        const shader_src = b.fmt("shaders/{s}", .{shader});
+        const shader_dest = shader_src;
+        glslc.clearEnvironment();
+        glslc.addFileArg(b.path(shader_src));
+        glslc.addArg("-o");
+        const output = glslc.addOutputFileArg(shader_dest);
+        const step = b.addInstallFile(output, shader_dest);
+
+        b.getInstallStep().dependOn(&step.step);
+    }
+
     const vulkan_mod = b.dependency("vulkan_zig", .{
         .registry = b.path("vk.xml"),
     }).module("vulkan-zig");
