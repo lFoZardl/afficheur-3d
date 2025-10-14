@@ -40,6 +40,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "shaders",
         "src",
         "README.md",
         "vk.xml",

@@ -13,6 +13,13 @@ const glfw = @import("glfw.zig");
 const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
 
+const shaders = .{
+    .defaut = .{
+        .frag = @embedFile("shader:defaut.frag.spv"),
+        .vert = @embedFile("shader:defaut.vert.spv"),
+    },
+};
+
 const debugVulkan = true;
 const validation_layers: ?[]const [*:0]const u8 =
     if (debugVulkan)
@@ -316,8 +323,16 @@ const Application = struct {
             assert(taille_framebuffer.height > 0);
 
             return vk.Extent2D{
-                .width = std.math.clamp(@as(u32, @intCast(taille_framebuffer.width)), capabilities.min_image_extent.width, capabilities.max_image_extent.width),
-                .height = std.math.clamp(@as(u32, @intCast(taille_framebuffer.height)), capabilities.min_image_extent.height, capabilities.max_image_extent.height),
+                .width = std.math.clamp(
+                    @as(u32, @intCast(taille_framebuffer.width)),
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                .height = std.math.clamp(
+                    @as(u32, @intCast(taille_framebuffer.height)),
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
             };
         }
     }
@@ -453,6 +468,40 @@ const Application = struct {
         }
     }
 
+    fn createGraphicsPipeline(self: *Self) !void {
+        const vert_shader_module = try self.vkd.createShaderModule(self.device, &.{
+            .flags = .{},
+            .code_size = shaders.defaut.vert.len,
+            .p_code = @alignCast(@ptrCast(shaders.defaut.vert.ptr)),
+        }, null);
+        const frag_shader_module = try self.vkd.createShaderModule(self.device, &.{
+            .flags = .{},
+            .code_size = shaders.defaut.frag.len,
+            .p_code = @alignCast(@ptrCast(shaders.defaut.frag.ptr)),
+        }, null);
+        defer self.vkd.destroyShaderModule(self.device, vert_shader_module, null);
+        defer self.vkd.destroyShaderModule(self.device, frag_shader_module, null);
+
+        const shader_stages = [_]vk.PipelineShaderStageCreateInfo{
+            .{
+                .flags = .{},
+                .stage = .{ .vertex_bit = true },
+                .module = vert_shader_module,
+                .p_name = "main",
+                .p_specialization_info = null,
+            },
+            .{
+                .flags = .{},
+                .stage = .{ .fragment_bit = true },
+                .module = frag_shader_module,
+                .p_name = "main",
+                .p_specialization_info = null,
+            },
+        };
+
+        std.log.debug("temp hold for compiler error on unused const for shader_stages: {}", .{shader_stages.len});
+    }
+
     pub fn init() !Self {
         var self: Self = .{};
         self._arena = .init(gpa);
@@ -514,25 +563,12 @@ const Application = struct {
         }
         //fin vk debug messenger
 
-        //déb vk surface
         try self.createSurface();
-        //fin vk surface
-
-        //déb vk physical devices
         try self.pickPhysicalDevice();
-        //fin vk physical devices
-
-        //déb vk logical devices
         try self.createLogicalDevice();
-        //fin vk logical devices
-
-        // déb vk swap chain
         try self.createSwapChain();
-        // fin vk swap chain
-
-        // déb vk image views
         try self.createImageViews();
-        // fin vk image views
+        try self.createGraphicsPipeline();
 
         return self;
     }

@@ -67,17 +67,22 @@ pub fn build(b: *std.Build) void {
         "defaut.frag",
         "defaut.vert",
     };
-    for (shaders) |shader| {
+    inline for (shaders) |shader| {
         var glslc = b.addSystemCommand(&.{"glslc"});
         const shader_src = b.fmt("shaders/{s}", .{shader});
-        const shader_dest = shader_src;
+        const shader_output_name = shader ++ ".spv";
         glslc.clearEnvironment();
         glslc.addFileArg(b.path(shader_src));
-        glslc.addArg("-o");
-        const output = glslc.addOutputFileArg(shader_dest);
-        const step = b.addInstallFile(output, shader_dest);
+        if(optimize == .Debug) {
+            glslc.addArg("-g");
+        }
+        const output = glslc.addPrefixedOutputFileArg("-o", shader_output_name);
+        //const step = b.addInstallFile(output, shader_dest);
+        exe.root_module.addAnonymousImport("shader:" ++ shader_output_name, .{
+            .root_source_file = output,
+        });
 
-        b.getInstallStep().dependOn(&step.step);
+        //b.getInstallStep().dependOn(&step.step);
     }
 
     const vulkan_mod = b.dependency("vulkan_zig", .{
