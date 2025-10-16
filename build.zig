@@ -60,6 +60,7 @@ pub fn build(b: *std.Build) void {
                 // importing modules from different packages).
             },
         }),
+        //.use_llvm = true,
     });
 
     // La documentation du système de build est inexistante lol.
@@ -73,7 +74,7 @@ pub fn build(b: *std.Build) void {
         const shader_output_name = shader ++ ".spv";
         glslc.clearEnvironment();
         glslc.addFileArg(b.path(shader_src));
-        if(optimize == .Debug) {
+        if (optimize == .Debug) {
             glslc.addArg("-g");
         }
         const output = glslc.addPrefixedOutputFileArg("-o", shader_output_name);

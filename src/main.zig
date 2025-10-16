@@ -13,10 +13,33 @@ const glfw = @import("glfw.zig");
 const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
 
+const Shader = struct {
+    nom: [:0]const u8,
+    stage: vk.ShaderStageFlags,
+    code: [:0]const u32,
+
+    pub fn getCodePtr(self: Shader) [*]const u32 {
+        return @ptrCast(@alignCast(self.code.ptr));
+    }
+
+    pub fn getCodeLen(self: Shader) usize {
+        return self.code.len * @sizeOf(@TypeOf(self.code[0]));
+    }
+};
+
 const shaders = .{
     .defaut = .{
-        .frag = @embedFile("shader:defaut.frag.spv"),
-        .vert = @embedFile("shader:defaut.vert.spv"),
+        .frag = Shader{
+            .nom = "defaut.frag",
+            .stage = .{ .fragment_bit = true },
+            .code = @ptrCast(@alignCast(@embedFile("shader:defaut.frag.spv"))),
+        },
+        .vert = Shader{
+            .nom = "defaut.vert",
+            .stage = .{ .vertex_bit = true },
+            //.code = @embedFile("shader:defaut.vert.spv"),
+            .code = @ptrCast(@alignCast(@embedFile("shader:defaut.vert.spv"))),
+        },
     },
 };
 
@@ -75,6 +98,8 @@ const Application = struct {
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     swap_chain_image_views: std.ArrayList(vk.ImageView) = .empty,
+
+    pipeline_layout: vk.PipelineLayout = .null_handle,
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -471,13 +496,13 @@ const Application = struct {
     fn createGraphicsPipeline(self: *Self) !void {
         const vert_shader_module = try self.vkd.createShaderModule(self.device, &.{
             .flags = .{},
-            .code_size = shaders.defaut.vert.len,
-            .p_code = @alignCast(@ptrCast(shaders.defaut.vert.ptr)),
+            .code_size = shaders.defaut.vert.getCodeLen(),
+            .p_code = shaders.defaut.vert.getCodePtr(),
         }, null);
         const frag_shader_module = try self.vkd.createShaderModule(self.device, &.{
             .flags = .{},
-            .code_size = shaders.defaut.frag.len,
-            .p_code = @alignCast(@ptrCast(shaders.defaut.frag.ptr)),
+            .code_size = shaders.defaut.frag.getCodeLen(),
+            .p_code = shaders.defaut.frag.getCodePtr(),
         }, null);
         defer self.vkd.destroyShaderModule(self.device, vert_shader_module, null);
         defer self.vkd.destroyShaderModule(self.device, frag_shader_module, null);
@@ -485,21 +510,111 @@ const Application = struct {
         const shader_stages = [_]vk.PipelineShaderStageCreateInfo{
             .{
                 .flags = .{},
-                .stage = .{ .vertex_bit = true },
+                .stage = shaders.defaut.vert.stage,
                 .module = vert_shader_module,
                 .p_name = "main",
                 .p_specialization_info = null,
             },
             .{
                 .flags = .{},
-                .stage = .{ .fragment_bit = true },
+                .stage = shaders.defaut.frag.stage,
                 .module = frag_shader_module,
                 .p_name = "main",
                 .p_specialization_info = null,
             },
         };
 
-        std.log.debug("temp hold for compiler error on unused const for shader_stages: {}", .{shader_stages.len});
+        const vertex_input_info = vk.PipelineVertexInputStateCreateInfo{
+            .flags = .{},
+            .vertex_binding_description_count = 0,
+            .p_vertex_binding_descriptions = undefined,
+            .vertex_attribute_description_count = 0,
+            .p_vertex_attribute_descriptions = undefined,
+        };
+
+        const input_assembly = vk.PipelineInputAssemblyStateCreateInfo{
+            .flags = .{},
+            .topology = .triangle_list,
+            .primitive_restart_enable = .false,
+        };
+
+        const viewport_state = vk.PipelineViewportStateCreateInfo{
+            .flags = .{},
+            .viewport_count = 1,
+            .p_viewports = undefined,
+            .scissor_count = 1,
+            .p_scissors = undefined,
+        };
+
+        const rasterizer = vk.PipelineRasterizationStateCreateInfo{
+            .flags = .{},
+            .depth_clamp_enable = .false,
+            .rasterizer_discard_enable = .false,
+            .polygon_mode = .fill,
+            .cull_mode = .{ .back_bit = true },
+            .front_face = .clockwise,
+            .depth_bias_enable = .false,
+            .depth_bias_constant_factor = 0,
+            .depth_bias_clamp = 0,
+            .depth_bias_slope_factor = 0,
+            .line_width = 1,
+        };
+
+        const multisampling = vk.PipelineMultisampleStateCreateInfo{
+            .flags = .{},
+            .rasterization_samples = .{ .@"1_bit" = true },
+            .sample_shading_enable = .false,
+            .min_sample_shading = 1,
+            .p_sample_mask = null,
+            .alpha_to_coverage_enable = .false,
+            .alpha_to_one_enable = .false,
+        };
+
+        const color_blend_attachment = [_]vk.PipelineColorBlendAttachmentState{.{
+            .blend_enable = .false,
+            .src_color_blend_factor = .one,
+            .dst_color_blend_factor = .zero,
+            .color_blend_op = .add,
+            .src_alpha_blend_factor = .one,
+            .dst_alpha_blend_factor = .zero,
+            .alpha_blend_op = .add,
+            .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        }};
+
+        const color_blending = vk.PipelineColorBlendStateCreateInfo{
+            .flags = .{},
+            .logic_op_enable = .false,
+            .logic_op = .copy,
+            .attachment_count = color_blend_attachment.len,
+            .p_attachments = &color_blend_attachment,
+            .blend_constants = [_]f32{ 0, 0, 0, 0 },
+        };
+        const dynamic_states = [_]vk.DynamicState{ .viewport, .scissor };
+
+        const dynamic_state = vk.PipelineDynamicStateCreateInfo{
+            .flags = .{},
+            .dynamic_state_count = dynamic_states.len,
+            .p_dynamic_states = &dynamic_states,
+        };
+
+        self.pipeline_layout = try self.vkd.createPipelineLayout(self.device, &.{
+            .flags = .{},
+            .set_layout_count = 0,
+            .p_set_layouts = undefined,
+            .push_constant_range_count = 0,
+            .p_push_constant_ranges = undefined,
+        }, null);
+
+        std.log.debug("temp hold for compiler errors: {any} {any} {any} {any} {any} {any} {any} {any}", .{
+            dynamic_state,
+            color_blending,
+            multisampling,
+            rasterizer,
+            viewport_state,
+            vertex_input_info,
+            shader_stages,
+            input_assembly,
+        });
     }
 
     pub fn init() !Self {
@@ -574,6 +689,12 @@ const Application = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        // déb vk graphics pipeline
+        assert(self.pipeline_layout != .null_handle);
+        self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
+        self.pipeline_layout = .null_handle;
+        // fin vk graphics pipeline
+
         // déb vk image views
         assert(self.swap_chain_image_views.items.len > 0);
         for (self.swap_chain_image_views.items) |image_view| {
@@ -592,25 +713,30 @@ const Application = struct {
         //déb vk logical devices
         assert(self.device != .null_handle);
         self.vkd.destroyDevice(self.device, null);
+        self.device = .null_handle;
         //fin vk logical devices
 
         //déb vk surface
         assert(self.surface != .null_handle);
         self.vki.destroySurfaceKHR(self.instance, self.surface, null);
+        self.surface = .null_handle;
         //fin vk surface
 
         //déb vk debug messenger
         if (debugVulkan and self.debug_messenger != .null_handle) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         }
+        self.debug_messenger = .null_handle;
         //fin vk debug messenger
 
         //déb vk instance
         assert(self.instance != .null_handle);
         self.vki.destroyInstance(self.instance, null);
+        self.instance = .null_handle;
         //fin vk instance
 
         self.fenetre.destroy();
+        self.fenetre = undefined;
         glfw.terminate();
         self._arena.deinit();
     }
@@ -647,15 +773,14 @@ pub fn main() !void {
 
     var list_extensions = try app.getInstanceExtensions(app._arena.allocator());
     defer list_extensions.deinit(app._arena.allocator());
-
     for (list_extensions.items) |extension| {
         std.debug.print("\t{s}\n", .{extension.extension_name});
     }
-
     var list_layers = try app.getInstanceLayers(app._arena.allocator());
     defer list_layers.deinit(app._arena.allocator());
     for (list_layers.items) |layer| {
         std.debug.print("\t{s}\n", .{layer.layer_name});
     }
+
     app.run();
 }
