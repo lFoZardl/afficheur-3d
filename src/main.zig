@@ -101,6 +101,7 @@ const Application = struct {
 
     render_pass: vk.RenderPass = .null_handle,
     pipeline_layout: vk.PipelineLayout = .null_handle,
+    graphics_pipeline: vk.Pipeline = .null_handle,
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -642,16 +643,38 @@ const Application = struct {
             .p_push_constant_ranges = undefined,
         }, null);
 
-        std.log.debug("temp hold for compiler errors: {any} {any} {any} {any} {any} {any} {any} {any}", .{
-            dynamic_state,
-            color_blending,
-            multisampling,
-            rasterizer,
-            viewport_state,
-            vertex_input_info,
-            shader_stages,
-            input_assembly,
-        });
+        const pipeline_info = [_]vk.GraphicsPipelineCreateInfo{.{
+            .flags = .{},
+            .stage_count = shader_stages.len,
+            .p_stages = &shader_stages,
+            .p_vertex_input_state = &vertex_input_info,
+            .p_input_assembly_state = &input_assembly,
+            .p_tessellation_state = null,
+            .p_viewport_state = &viewport_state,
+            .p_rasterization_state = &rasterizer,
+            .p_multisample_state = &multisampling,
+            .p_depth_stencil_state = null,
+            .p_color_blend_state = &color_blending,
+            .p_dynamic_state = &dynamic_state,
+            .layout = self.pipeline_layout,
+            .render_pass = self.render_pass,
+            .subpass = 0,
+            .base_pipeline_handle = .null_handle,
+            .base_pipeline_index = -1,
+        }};
+
+        const resultat = try self.vkd.createGraphicsPipelines(
+            self.device,
+            .null_handle,
+            pipeline_info.len,
+            &pipeline_info,
+            null,
+            @ptrCast(&self.graphics_pipeline),
+        );
+
+        if(resultat != .success) {
+            std.debug.print("creation du pipeline graphique a échoué : {}", .{resultat});
+        }
     }
 
     pub fn init() !Self {
@@ -728,6 +751,9 @@ const Application = struct {
 
     pub fn deinit(self: *Self) void {
         // déb vk graphics pipeline
+        assert(self.graphics_pipeline != .null_handle);
+        self.vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
+        self.graphics_pipeline = .null_handle;
         assert(self.pipeline_layout != .null_handle);
         self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         self.pipeline_layout = .null_handle;
