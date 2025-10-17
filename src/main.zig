@@ -99,6 +99,7 @@ const Application = struct {
     swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     swap_chain_image_views: std.ArrayList(vk.ImageView) = .empty,
 
+    render_pass: vk.RenderPass = .null_handle,
     pipeline_layout: vk.PipelineLayout = .null_handle,
 
     _arena: std.heap.ArenaAllocator = undefined,
@@ -493,6 +494,42 @@ const Application = struct {
         }
     }
 
+    fn createRenderPass(self: *Self) !void {
+        const color_attachment = [_]vk.AttachmentDescription{
+            .{
+                .format = self.swap_chain_image_format,
+                .samples = .{ .@"1_bit" = true },
+                .load_op = .clear,
+                .store_op = .store,
+                .stencil_load_op = .dont_care,
+                .stencil_store_op = .dont_care,
+                .initial_layout = .undefined,
+                .final_layout = .present_src_khr,
+            },
+        };
+        const color_attachment_ref = [_]vk.AttachmentReference{
+            .{
+                .attachment = 0,
+                .layout = .color_attachment_optimal,
+            },
+        };
+        const subpass = [_]vk.SubpassDescription{
+            .{
+                .pipeline_bind_point = .graphics,
+                .color_attachment_count = color_attachment_ref.len,
+                .p_color_attachments = &color_attachment_ref,
+            },
+        };
+        const render_pass_info = vk.RenderPassCreateInfo{
+            .attachment_count = color_attachment.len,
+            .p_attachments = &color_attachment,
+            .subpass_count = subpass.len,
+            .p_subpasses = &subpass,
+        };
+
+        self.render_pass = try self.vkd.createRenderPass(self.device, &render_pass_info, null);
+    }
+
     fn createGraphicsPipeline(self: *Self) !void {
         const vert_shader_module = try self.vkd.createShaderModule(self.device, &.{
             .flags = .{},
@@ -683,6 +720,7 @@ const Application = struct {
         try self.createLogicalDevice();
         try self.createSwapChain();
         try self.createImageViews();
+        try self.createRenderPass();
         try self.createGraphicsPipeline();
 
         return self;
@@ -694,6 +732,12 @@ const Application = struct {
         self.vkd.destroyPipelineLayout(self.device, self.pipeline_layout, null);
         self.pipeline_layout = .null_handle;
         // fin vk graphics pipeline
+
+        // déb vk render pass
+        assert(self.render_pass != .null_handle);
+        self.vkd.destroyRenderPass(self.device, self.render_pass, null);
+        self.render_pass = .null_handle;
+        // fin vk render pass
 
         // déb vk image views
         assert(self.swap_chain_image_views.items.len > 0);
