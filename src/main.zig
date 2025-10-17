@@ -102,6 +102,7 @@ const Application = struct {
     render_pass: vk.RenderPass = .null_handle,
     pipeline_layout: vk.PipelineLayout = .null_handle,
     graphics_pipeline: vk.Pipeline = .null_handle,
+    swap_chain_framebuffers: std.ArrayList(vk.Framebuffer) = .empty,
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -672,8 +673,35 @@ const Application = struct {
             @ptrCast(&self.graphics_pipeline),
         );
 
-        if(resultat != .success) {
+        if (resultat != .success) {
             std.debug.print("creation du pipeline graphique a échoué : {}", .{resultat});
+        }
+    }
+    fn createFramebuffers(self: *Self) !void {
+        try self.swap_chain_framebuffers.resize(
+            self._arena.allocator(),
+            self.swap_chain_image_views.items.len,
+        );
+
+        for (0..self.swap_chain_image_views.items.len) |i| {
+            const attachments = [_]vk.ImageView{
+                self.swap_chain_image_views.items[i],
+            };
+
+            const framebuffer_info = vk.FramebufferCreateInfo{
+                .render_pass = self.render_pass,
+                .attachment_count = attachments.len,
+                .p_attachments = &attachments,
+                .width = self.swap_chain_extent.width,
+                .height = self.swap_chain_extent.height,
+                .layers = 1,
+            };
+
+            self.swap_chain_framebuffers.items[i] = try self.vkd.createFramebuffer(
+                self.device,
+                &framebuffer_info,
+                null,
+            );
         }
     }
 
@@ -745,11 +773,20 @@ const Application = struct {
         try self.createImageViews();
         try self.createRenderPass();
         try self.createGraphicsPipeline();
+        try self.createFramebuffers();
 
         return self;
     }
 
     pub fn deinit(self: *Self) void {
+        // déb vk framebuffers
+        for (self.swap_chain_framebuffers.items) |framebuffer| {
+            assert(framebuffer != .null_handle);
+            self.vkd.destroyFramebuffer(self.device, framebuffer, null);
+        }
+        self.swap_chain_framebuffers.deinit(self._arena.allocator());
+        // fin vk framebuffers
+
         // déb vk graphics pipeline
         assert(self.graphics_pipeline != .null_handle);
         self.vkd.destroyPipeline(self.device, self.graphics_pipeline, null);
