@@ -1,17 +1,16 @@
 const std = @import("std");
 const builtin = @import("builtin");
-const assert = std.debug.assert;
-var gpa: std.mem.Allocator = undefined;
-
+const vk = @import("vulkan");
+const glfw = @import("glfw.zig");
+const terminal = @import("terminal.zig");
+const math = @import("maths.zig");
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
     @cInclude("GLFW/glfw3.h");
 });
-const vk = @import("vulkan");
+const assert = std.debug.assert;
 
-const glfw = @import("glfw.zig");
-const terminal = @import("terminal.zig");
-const math = @import("maths.zig");
+var gpa: std.mem.Allocator = undefined;
 
 const Shader = struct {
     nom: [:0]const u8,
@@ -37,7 +36,6 @@ const shaders = .{
         .vert = Shader{
             .nom = "defaut.vert",
             .stage = .{ .vertex_bit = true },
-            //.code = @embedFile("shader:defaut.vert.spv"),
             .code = @ptrCast(@alignCast(@embedFile("shader:defaut.vert.spv"))),
         },
     },
@@ -49,6 +47,8 @@ const validation_layers: ?[]const [*:0]const u8 =
         &.{"VK_LAYER_KHRONOS_validation"}
     else
         null;
+
+const max_frames_in_flight = 2;
 
 const device_extensions = [_][*:0]const u8{vk.extensions.khr_swapchain.name};
 
@@ -93,16 +93,24 @@ const Application = struct {
     graphics_queue: vk.Queue = .null_handle,
     present_queue: vk.Queue = .null_handle,
 
+    current_frame: u32 = 0,
     swap_chain: vk.SwapchainKHR = .null_handle,
     swap_chain_images: ?[]vk.Image = null,
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     swap_chain_image_views: std.ArrayList(vk.ImageView) = .empty,
+    swap_chain_framebuffers: std.ArrayList(vk.Framebuffer) = .empty,
 
     render_pass: vk.RenderPass = .null_handle,
     pipeline_layout: vk.PipelineLayout = .null_handle,
     graphics_pipeline: vk.Pipeline = .null_handle,
-    swap_chain_framebuffers: std.ArrayList(vk.Framebuffer) = .empty,
+
+    command_pool: vk.CommandPool = .null_handle,
+    command_buffers: std.ArrayList(vk.CommandBuffer) = .empty,
+
+    image_available_semaphores: std.ArrayList(vk.Semaphore) = .empty,
+    render_finished_semaphores: std.ArrayList(vk.Semaphore) = .empty,
+    in_flight_fences: std.ArrayList(vk.Fence) = .empty,
 
     _arena: std.heap.ArenaAllocator = undefined,
 
@@ -213,6 +221,10 @@ const Application = struct {
                 str_message,
             },
         );
+
+        if (message_severity.error_bit_ext) {
+            @breakpoint();
+        }
 
         return vk.Bool32.false;
     }
@@ -372,7 +384,7 @@ const Application = struct {
         const present_mode = chooseSwapPresentMode(swap_chain_support.present_modes.items);
         const extent = self.chooseSwapExtent(swap_chain_support.capabilities);
 
-        const nb_images =
+        const nb_images = // CECI A RAPPORT AVEC L'ERREUR DE vkQueueSubmit
             if (swap_chain_support.capabilities.max_image_count > swap_chain_support.capabilities.min_image_count)
                 swap_chain_support.capabilities.min_image_count + 1
             else
@@ -522,14 +534,25 @@ const Application = struct {
                 .p_color_attachments = &color_attachment_ref,
             },
         };
-        const render_pass_info = vk.RenderPassCreateInfo{
+        const dependencies = [_]vk.SubpassDependency{
+            .{
+                .src_subpass = vk.SUBPASS_EXTERNAL,
+                .dst_subpass = 0,
+                .src_stage_mask = .{ .color_attachment_output_bit = true },
+                .src_access_mask = .{},
+                .dst_stage_mask = .{ .color_attachment_output_bit = true },
+                .dst_access_mask = .{ .color_attachment_write_bit = true },
+                .dependency_flags = .{},
+            },
+        };
+        self.render_pass = try self.vkd.createRenderPass(self.device, &.{
             .attachment_count = color_attachment.len,
             .p_attachments = &color_attachment,
             .subpass_count = subpass.len,
             .p_subpasses = &subpass,
-        };
-
-        self.render_pass = try self.vkd.createRenderPass(self.device, &render_pass_info, null);
+            .dependency_count = 1,
+            .p_dependencies = &dependencies,
+        }, null);
     }
 
     fn createGraphicsPipeline(self: *Self) !void {
@@ -704,6 +727,92 @@ const Application = struct {
             );
         }
     }
+    fn createCommandPool(self: *Self) !void {
+        var queue_family_indices = try self.findQueueFamilies(self.physical_device);
+
+        const pool_info = vk.CommandPoolCreateInfo{
+            .flags = .{ .reset_command_buffer_bit = true },
+            .queue_family_index = queue_family_indices.graphics_family.?,
+        };
+
+        self.command_pool = try self.vkd.createCommandPool(self.device, &pool_info, null);
+    }
+    fn createCommandBuffers(self: *Self) !void {
+        try self.command_buffers.resize(self._arena.allocator(), max_frames_in_flight);
+
+        try self.vkd.allocateCommandBuffers(
+            self.device,
+            &.{
+                .command_pool = self.command_pool,
+                .level = .primary,
+                .command_buffer_count = @intCast(self.command_buffers.items.len),
+            },
+            self.command_buffers.items.ptr,
+        );
+    }
+    fn recordCommandBuffer(self: *Self, command_buffer: vk.CommandBuffer, image_index: u32) !void {
+        try self.vkd.beginCommandBuffer(command_buffer, &.{});
+
+        const clear_values = [_]vk.ClearValue{.{
+            .color = .{ .float_32 = .{ 0, 0, 0, 1 } },
+        }};
+
+        const render_pass_info = vk.RenderPassBeginInfo{
+            .render_pass = self.render_pass,
+            .framebuffer = self.swap_chain_framebuffers.items[image_index],
+            .render_area = vk.Rect2D{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = self.swap_chain_extent,
+            },
+            .clear_value_count = clear_values.len,
+            .p_clear_values = &clear_values,
+        };
+
+        self.vkd.cmdBeginRenderPass(command_buffer, &render_pass_info, .@"inline");
+        {
+            self.vkd.cmdBindPipeline(command_buffer, .graphics, self.graphics_pipeline);
+
+            const viewports = [_]vk.Viewport{.{
+                .x = 0,
+                .y = 0,
+                .width = @floatFromInt(self.swap_chain_extent.width),
+                .height = @floatFromInt(self.swap_chain_extent.height),
+                .min_depth = 0,
+                .max_depth = 1,
+            }};
+            self.vkd.cmdSetViewport(command_buffer, 0, viewports.len, &viewports);
+
+            const scissors = [_]vk.Rect2D{.{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = self.swap_chain_extent,
+            }};
+            self.vkd.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
+
+            self.vkd.cmdDraw(command_buffer, 3, 1, 0, 0);
+        }
+        self.vkd.cmdEndRenderPass(command_buffer);
+
+        try self.vkd.endCommandBuffer(command_buffer);
+    }
+    fn createSyncObjects(self: *Self) !void {
+        try self.image_available_semaphores.resize(self._arena.allocator(), max_frames_in_flight);
+        try self.render_finished_semaphores.resize(self._arena.allocator(), max_frames_in_flight);
+        try self.in_flight_fences.resize(self._arena.allocator(), max_frames_in_flight);
+
+        for (
+            self.image_available_semaphores.items,
+            self.render_finished_semaphores.items,
+            self.in_flight_fences.items,
+        ) |
+            *image_available_semaphore,
+            *render_finished_semaphore,
+            *in_flight_fence,
+        | {
+            image_available_semaphore.* = try self.vkd.createSemaphore(self.device, &.{ .flags = .{} }, null);
+            render_finished_semaphore.* = try self.vkd.createSemaphore(self.device, &.{ .flags = .{} }, null);
+            in_flight_fence.* = try self.vkd.createFence(self.device, &.{ .flags = .{ .signaled_bit = true } }, null);
+        }
+    }
 
     pub fn init() !Self {
         var self: Self = .{};
@@ -774,11 +883,39 @@ const Application = struct {
         try self.createRenderPass();
         try self.createGraphicsPipeline();
         try self.createFramebuffers();
+        try self.createCommandPool();
+        try self.createCommandBuffers();
+        try self.createSyncObjects();
 
         return self;
     }
 
     pub fn deinit(self: *Self) void {
+        // déb vk syncObjects
+        for (
+            self.image_available_semaphores.items,
+            self.render_finished_semaphores.items,
+            self.in_flight_fences.items,
+        ) |
+            *image_available_semaphore,
+            *render_finished_semaphore,
+            *in_flight_fence,
+        | {
+            self.vkd.destroySemaphore(self.device, image_available_semaphore.*, null);
+            self.vkd.destroySemaphore(self.device, render_finished_semaphore.*, null);
+            self.vkd.destroyFence(self.device, in_flight_fence.*, null);
+        }
+        self.image_available_semaphores.deinit(self._arena.allocator());
+        self.render_finished_semaphores.deinit(self._arena.allocator());
+        self.in_flight_fences.deinit(self._arena.allocator());
+        // fin vk syncObjects
+
+        // déb vk command pool
+        assert(self.command_pool != .null_handle);
+        self.vkd.destroyCommandPool(self.device, self.command_pool, null);
+        self.command_buffers.deinit(self._arena.allocator());
+        // fin vk command pool
+
         // déb vk framebuffers
         for (self.swap_chain_framebuffers.items) |framebuffer| {
             assert(framebuffer != .null_handle);
@@ -848,19 +985,83 @@ const Application = struct {
         self._arena.deinit();
     }
 
+    fn draw(self: *Self) !void {
+        defer self.current_frame += 1;
+        const frame_index = self.current_frame % max_frames_in_flight;
+        const render_finished_semaphore = self.render_finished_semaphores.items[frame_index];
+        const image_available_semaphore = self.image_available_semaphores.items[frame_index];
+        const in_flight_fence = self.in_flight_fences.items[frame_index];
+        const command_buffer = self.command_buffers.items[frame_index];
+
+        _ = try self.vkd.waitForFences(
+            self.device,
+            1,
+            &.{in_flight_fence},
+            .true,
+            std.math.maxInt(u64),
+        );
+        try self.vkd.resetFences(self.device, 1, &.{in_flight_fence});
+
+        const result = try self.vkd.acquireNextImageKHR(
+            self.device,
+            self.swap_chain,
+            std.math.maxInt(u64),
+            image_available_semaphore,
+            .null_handle,
+        );
+
+        try self.vkd.resetCommandBuffer(command_buffer, .{});
+        try self.recordCommandBuffer(command_buffer, result.image_index);
+
+        const wait_semaphores = [_]vk.Semaphore{image_available_semaphore};
+        const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+        const signal_semaphores = [_]vk.Semaphore{render_finished_semaphore};
+
+        std.debug.print("vkQueueSubmit appelé\n", .{});
+        _ = try self.vkd.queueSubmit(
+            self.graphics_queue,
+            1,
+            &.{.{
+                .wait_semaphore_count = wait_semaphores.len,
+                .p_wait_semaphores = &wait_semaphores,
+                .p_wait_dst_stage_mask = &wait_stages,
+                .command_buffer_count = 1,
+                .p_command_buffers = &.{command_buffer},
+                .signal_semaphore_count = signal_semaphores.len,
+                .p_signal_semaphores = &signal_semaphores,
+            }},
+            in_flight_fence,
+        );
+
+        _ = try self.vkd.queuePresentKHR(self.present_queue, &.{
+            .wait_semaphore_count = signal_semaphores.len,
+            .p_wait_semaphores = &signal_semaphores,
+            .swapchain_count = 1,
+            .p_swapchains = &.{self.swap_chain},
+            .p_image_indices = &.{result.image_index},
+            .p_results = null,
+        });
+    }
+
     pub fn step(self: *Self) void {
         std.Thread.sleep(std.time.ns_per_s / 60);
 
         self.fenetre.swapBuffers();
 
         glfw.pollEvents();
+
+        self.draw() catch |e| {
+            std.debug.print("erreur dans draw : {}", .{e});
+        };
     }
 
-    pub fn run(self: *Self) void {
+    pub fn run(self: *Self) !void {
         self.fenetre.makeContextCurrent();
         while (!self.fenetre.shouldClose()) {
             self.step();
         }
+
+        try self.vkd.deviceWaitIdle(self.device);
     }
 };
 
@@ -889,5 +1090,5 @@ pub fn main() !void {
         std.debug.print("\t{s}\n", .{layer.layer_name});
     }
 
-    app.run();
+    try app.run();
 }
