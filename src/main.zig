@@ -41,9 +41,9 @@ const shaders = .{
     },
 };
 
-const debugVulkan = true;
+const debug_vulkan = true;
 const validation_layers: ?[]const [*:0]const u8 =
-    if (debugVulkan)
+    if (debug_vulkan)
         &.{"VK_LAYER_KHRONOS_validation"}
     else
         null;
@@ -78,6 +78,7 @@ const Application = struct {
     const Self = @This();
 
     fenetre: *glfw.Window = undefined,
+    resized: bool = false,
 
     vkb: vk.BaseWrapper = undefined,
     vki: vk.InstanceWrapper = undefined,
@@ -95,7 +96,7 @@ const Application = struct {
 
     current_frame: u32 = 0,
     swap_chain: vk.SwapchainKHR = .null_handle,
-    swap_chain_images: ?[]vk.Image = null,
+    swap_chain_images: std.ArrayList(vk.Image) = .empty,
     swap_chain_image_format: vk.Format = .undefined,
     swap_chain_extent: vk.Extent2D = .{ .width = 0, .height = 0 },
     swap_chain_image_views: std.ArrayList(vk.ImageView) = .empty,
@@ -223,7 +224,7 @@ const Application = struct {
         );
 
         if (message_severity.error_bit_ext) {
-            @breakpoint();
+            if (debug_vulkan) @breakpoint();
         }
 
         return vk.Bool32.false;
@@ -254,7 +255,7 @@ const Application = struct {
         // ajouter les extensions GLFW dans la liste
         try list.appendSlice(allocator, glfw_extensions);
 
-        if (debugVulkan) {
+        if (debug_vulkan) {
             try list.append(allocator, vk.extensions.ext_debug_utils.name);
         }
         return list;
@@ -385,10 +386,11 @@ const Application = struct {
         const extent = self.chooseSwapExtent(swap_chain_support.capabilities);
 
         const nb_images = // CECI A RAPPORT AVEC L'ERREUR DE vkQueueSubmit
-            if (swap_chain_support.capabilities.max_image_count > swap_chain_support.capabilities.min_image_count)
-                swap_chain_support.capabilities.min_image_count + 1
-            else
-                swap_chain_support.capabilities.min_image_count;
+            //if (swap_chain_support.capabilities.max_image_count > swap_chain_support.capabilities.min_image_count)
+            //swap_chain_support.capabilities.min_image_count + 1
+            //else
+            //swap_chain_support.capabilities.min_image_count;
+            max_frames_in_flight;
 
         const indices = try self.findQueueFamilies(self.physical_device);
         const queue_family_indices = [_]u32{ indices.graphics_family.?, indices.present_family.? };
@@ -415,10 +417,51 @@ const Application = struct {
             .clipped = .true,
         }, null);
 
-        self.swap_chain_images = try self.vkd.getSwapchainImagesAllocKHR(self.device, self.swap_chain, self._arena.allocator());
+        self.swap_chain_images = .fromOwnedSlice(
+            try self.vkd.getSwapchainImagesAllocKHR(self.device, self.swap_chain, self._arena.allocator()),
+        );
 
         self.swap_chain_image_format = surface_format.format;
         self.swap_chain_extent = extent;
+    }
+
+    fn cleanupSwapChain(self: *Self) void {
+        // déb vk framebuffers
+        for (self.swap_chain_framebuffers.items) |framebuffer| {
+            self.vkd.destroyFramebuffer(self.device, framebuffer, null);
+        }
+        self.swap_chain_framebuffers.clearAndFree(self._arena.allocator());
+        // fin vk framebuffers
+
+        // déb vk image views
+        assert(self.swap_chain_image_views.items.len > 0);
+        for (self.swap_chain_image_views.items) |image_view| {
+            self.vkd.destroyImageView(self.device, image_view, null);
+        }
+        self.swap_chain_image_views.clearAndFree(self._arena.allocator());
+        // fin vk image views
+
+        // déb vk swap chain
+        assert(self.swap_chain_images.items.len > 0);
+        self.swap_chain_images.clearAndFree(self._arena.allocator());
+        assert(self.swap_chain != .null_handle);
+        self.vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
+        // fin vk swap chain
+    }
+    fn recreateSwapChain(self: *Self) !void {
+        var taille = self.fenetre.getFramebufferSize();
+        while (taille.height < 1 or taille.width < 1) {
+            taille = self.fenetre.getFramebufferSize();
+            glfw.waitEvents();
+        }
+
+        try self.vkd.deviceWaitIdle(self.device);
+
+        self.cleanupSwapChain();
+
+        try self.createSwapChain();
+        try self.createImageViews();
+        try self.createFramebuffers();
     }
     // fin fonctions pour swapchain
 
@@ -488,10 +531,10 @@ const Application = struct {
     }
 
     fn createImageViews(self: *Self) !void {
-        try self.swap_chain_image_views.resize(self._arena.allocator(), self.swap_chain_images.?.len);
+        try self.swap_chain_image_views.resize(self._arena.allocator(), self.swap_chain_images.items.len);
 
-        assert(self.swap_chain_images != null);
-        for (self.swap_chain_images.?, self.swap_chain_image_views.items) |image, *image_view| {
+        assert(self.swap_chain_images.items.len > 0);
+        for (self.swap_chain_images.items, self.swap_chain_image_views.items) |image, *image_view| {
             image_view.* = try self.vkd.createImageView(self.device, &.{
                 .image = image,
                 .view_type = .@"2d",
@@ -706,23 +749,23 @@ const Application = struct {
             self.swap_chain_image_views.items.len,
         );
 
+        assert(self.swap_chain_framebuffers.items.len == self.swap_chain_image_views.items.len);
         for (0..self.swap_chain_image_views.items.len) |i| {
             const attachments = [_]vk.ImageView{
                 self.swap_chain_image_views.items[i],
             };
 
-            const framebuffer_info = vk.FramebufferCreateInfo{
-                .render_pass = self.render_pass,
-                .attachment_count = attachments.len,
-                .p_attachments = &attachments,
-                .width = self.swap_chain_extent.width,
-                .height = self.swap_chain_extent.height,
-                .layers = 1,
-            };
-
+            self.swap_chain_framebuffers.items[i] = .null_handle;
             self.swap_chain_framebuffers.items[i] = try self.vkd.createFramebuffer(
                 self.device,
-                &framebuffer_info,
+                &.{
+                    .render_pass = self.render_pass,
+                    .attachment_count = attachments.len,
+                    .p_attachments = &attachments,
+                    .width = self.swap_chain_extent.width,
+                    .height = self.swap_chain_extent.height,
+                    .layers = 1,
+                },
                 null,
             );
         }
@@ -814,8 +857,8 @@ const Application = struct {
         }
     }
 
-    pub fn init() !Self {
-        var self: Self = .{};
+    pub fn init(self: *Self) !void {
+        self.* = .{};
         self._arena = .init(gpa);
         errdefer self._arena.deinit();
         if (glfw.init() == 0) {
@@ -823,11 +866,19 @@ const Application = struct {
         }
 
         c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
-        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_FALSE);
+        c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_TRUE);
         self.fenetre = glfw.Window.create(200, 200, "allo", null, null) catch {
-            std.debug.print("fen invalide\n", .{});
+            std.debug.print("fenetre invalide\n", .{});
             return Erreur.CreationFenetre;
         };
+
+        self.fenetre.setUserPointer(self);
+        _ = self.fenetre.setFramebufferResizeCallback(opaque {
+            fn _(window: *glfw.Window, _: i32, _: i32) callconv(.c) void {
+                var self_ptr: ?*Self = @ptrCast(@alignCast(window.getUserPointer()));
+                self_ptr.?.resized = true;
+            }
+        }._);
 
         //déb vk instance
         const vk_proc: *const fn (instance: vk.Instance, procname: [*:0]const u8) callconv(.c) vk.PfnVoidFunction = @ptrCast(&glfw.getInstanceProcAddress);
@@ -867,7 +918,7 @@ const Application = struct {
 
         //déb vk debug messenger
         self.debug_messenger = .null_handle;
-        if (debugVulkan) {
+        if (debug_vulkan) {
             var messenger_create_info: vk.DebugUtilsMessengerCreateInfoEXT = undefined;
             populateDebugMessengerCreateInfo(&messenger_create_info);
 
@@ -886,11 +937,10 @@ const Application = struct {
         try self.createCommandPool();
         try self.createCommandBuffers();
         try self.createSyncObjects();
-
-        return self;
     }
 
     pub fn deinit(self: *Self) void {
+        self.cleanupSwapChain();
         // déb vk syncObjects
         for (
             self.image_available_semaphores.items,
@@ -905,24 +955,12 @@ const Application = struct {
             self.vkd.destroySemaphore(self.device, render_finished_semaphore.*, null);
             self.vkd.destroyFence(self.device, in_flight_fence.*, null);
         }
-        self.image_available_semaphores.deinit(self._arena.allocator());
-        self.render_finished_semaphores.deinit(self._arena.allocator());
-        self.in_flight_fences.deinit(self._arena.allocator());
         // fin vk syncObjects
 
         // déb vk command pool
         assert(self.command_pool != .null_handle);
         self.vkd.destroyCommandPool(self.device, self.command_pool, null);
-        self.command_buffers.deinit(self._arena.allocator());
         // fin vk command pool
-
-        // déb vk framebuffers
-        for (self.swap_chain_framebuffers.items) |framebuffer| {
-            assert(framebuffer != .null_handle);
-            self.vkd.destroyFramebuffer(self.device, framebuffer, null);
-        }
-        self.swap_chain_framebuffers.deinit(self._arena.allocator());
-        // fin vk framebuffers
 
         // déb vk graphics pipeline
         assert(self.graphics_pipeline != .null_handle);
@@ -939,21 +977,6 @@ const Application = struct {
         self.render_pass = .null_handle;
         // fin vk render pass
 
-        // déb vk image views
-        assert(self.swap_chain_image_views.items.len > 0);
-        for (self.swap_chain_image_views.items) |image_view| {
-            self.vkd.destroyImageView(self.device, image_view, null);
-        }
-        self.swap_chain_image_views.clearAndFree(self._arena.allocator());
-        // fin vk image views
-
-        // déb vk swap chain
-        assert(self.swap_chain_images != null);
-        self._arena.allocator().free(self.swap_chain_images.?);
-        assert(self.swap_chain != .null_handle);
-        self.vkd.destroySwapchainKHR(self.device, self.swap_chain, null);
-        // fin vk swap chain
-
         //déb vk logical devices
         assert(self.device != .null_handle);
         self.vkd.destroyDevice(self.device, null);
@@ -967,7 +990,7 @@ const Application = struct {
         //fin vk surface
 
         //déb vk debug messenger
-        if (debugVulkan and self.debug_messenger != .null_handle) {
+        if (debug_vulkan and self.debug_messenger != .null_handle) {
             self.vki.destroyDebugUtilsMessengerEXT(self.instance, self.debug_messenger, null);
         }
         self.debug_messenger = .null_handle;
@@ -982,11 +1005,20 @@ const Application = struct {
         self.fenetre.destroy();
         self.fenetre = undefined;
         glfw.terminate();
+
+        // deinit manuel de tous les membres allouant de la mémoire.
+        self.in_flight_fences.deinit(self._arena.allocator());
+        self.render_finished_semaphores.deinit(self._arena.allocator());
+        self.image_available_semaphores.deinit(self._arena.allocator());
+        self.command_buffers.deinit(self._arena.allocator());
+        self.swap_chain_framebuffers.deinit(self._arena.allocator());
+        self.swap_chain_image_views.deinit(self._arena.allocator());
+        self.swap_chain_images.deinit(self._arena.allocator());
+
         self._arena.deinit();
     }
 
     fn draw(self: *Self) !void {
-        defer self.current_frame += 1;
         const frame_index = self.current_frame % max_frames_in_flight;
         const render_finished_semaphore = self.render_finished_semaphores.items[frame_index];
         const image_available_semaphore = self.image_available_semaphores.items[frame_index];
@@ -1000,15 +1032,25 @@ const Application = struct {
             .true,
             std.math.maxInt(u64),
         );
-        try self.vkd.resetFences(self.device, 1, &.{in_flight_fence});
 
-        const result = try self.vkd.acquireNextImageKHR(
+        const result = self.vkd.acquireNextImageKHR(
             self.device,
             self.swap_chain,
             std.math.maxInt(u64),
             image_available_semaphore,
             .null_handle,
-        );
+        ) catch |e| switch (e) {
+            error.OutOfDateKHR => {
+                try self.recreateSwapChain();
+                return;
+            },
+            else => |err| {
+                return err;
+            },
+        };
+
+        // reset seulement la fence si on draw
+        try self.vkd.resetFences(self.device, 1, &.{in_flight_fence});
 
         try self.vkd.resetCommandBuffer(command_buffer, .{});
         try self.recordCommandBuffer(command_buffer, result.image_index);
@@ -1017,7 +1059,7 @@ const Application = struct {
         const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
         const signal_semaphores = [_]vk.Semaphore{render_finished_semaphore};
 
-        std.debug.print("vkQueueSubmit appelé\n", .{});
+        // parfois il y a une erreur ici...
         _ = try self.vkd.queueSubmit(
             self.graphics_queue,
             1,
@@ -1033,14 +1075,31 @@ const Application = struct {
             in_flight_fence,
         );
 
-        _ = try self.vkd.queuePresentKHR(self.present_queue, &.{
+        const result_present = self.vkd.queuePresentKHR(self.present_queue, &.{
             .wait_semaphore_count = signal_semaphores.len,
             .p_wait_semaphores = &signal_semaphores,
             .swapchain_count = 1,
             .p_swapchains = &.{self.swap_chain},
             .p_image_indices = &.{result.image_index},
             .p_results = null,
-        });
+        }) catch |e| switch (e) {
+            error.OutOfDateKHR => {
+                std.debug.print("SwapChain recréée!\n", .{});
+                try self.recreateSwapChain();
+                return;
+            },
+            else => |err| {
+                return err;
+            },
+        };
+
+        if (result_present == .suboptimal_khr or self.resized == true) {
+            self.resized = false;
+            try self.recreateSwapChain();
+            return;
+        }
+
+        self.current_frame += 1;
     }
 
     pub fn step(self: *Self) void {
@@ -1073,22 +1132,23 @@ pub fn main() !void {
     defer if (builtin.mode == .Debug) assert(gpa_debug.deinit() == .ok);
     gpa = gpa_debug.allocator();
 
-    var app = Application.init() catch |e| {
+    var app: Application = undefined;
+    app.init() catch |e| {
         std.debug.print("Erreur ({})\n", .{e});
         return e;
     };
     defer app.deinit();
 
-    var list_extensions = try app.getInstanceExtensions(app._arena.allocator());
-    defer list_extensions.deinit(app._arena.allocator());
-    for (list_extensions.items) |extension| {
-        std.debug.print("\t{s}\n", .{extension.extension_name});
-    }
-    var list_layers = try app.getInstanceLayers(app._arena.allocator());
-    defer list_layers.deinit(app._arena.allocator());
-    for (list_layers.items) |layer| {
-        std.debug.print("\t{s}\n", .{layer.layer_name});
-    }
+    //var list_extensions = try app.getInstanceExtensions(app._arena.allocator());
+    //defer list_extensions.deinit(app._arena.allocator());
+    //for (list_extensions.items) |extension| {
+    //std.debug.print("\t{s}\n", .{extension.extension_name});
+    //}
+    //var list_layers = try app.getInstanceLayers(app._arena.allocator());
+    //defer list_layers.deinit(app._arena.allocator());
+    //for (list_layers.items) |layer| {
+    //std.debug.print("\t{s}\n", .{layer.layer_name});
+    //}
 
     try app.run();
 }

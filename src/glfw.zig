@@ -274,6 +274,21 @@ pub const Window = opaque {
 
         return surface;
     }
+
+    pub fn getUserPointer(self: *Self) ?*anyopaque {
+        return c.glfwGetWindowUserPointer(@ptrCast(self));
+    }
+    pub fn setUserPointer(self: *Self, pointer: *anyopaque) void {
+        c.glfwSetWindowUserPointer(@ptrCast(self), pointer);
+    }
+
+    pub const Framebuffersizefun = *const fn (window: *Self, width: i32, height: i32) callconv(.c) void;
+    pub fn setFramebufferResizeCallback(self: *Self, callback: Framebuffersizefun) ?Framebuffersizefun {
+        return @ptrCast(c.glfwSetFramebufferSizeCallback(
+            @ptrCast(self),
+            @ptrCast(callback),
+        ));
+    }
 };
 
 pub const Image = struct {
