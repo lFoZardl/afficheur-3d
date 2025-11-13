@@ -97,7 +97,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.linkSystemLibrary("Xrandr", .{});
     exe.root_module.linkSystemLibrary("Xi", .{});
     exe.root_module.linkSystemLibrary("Xcursor", .{});
-    exe.root_module.linkSystemLibrary("dl", .{});
+    //exe.root_module.linkSystemLibrary("dl", .{});
     exe.root_module.linkSystemLibrary("m", .{});
     ////
 
