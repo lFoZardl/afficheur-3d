@@ -101,7 +101,7 @@ const Vertex = struct {
     };
 };
 
-const buffer = retour: {
+const static_buffer_data = retour: {
     break :retour [_]Vertex{
         .{
             .position = .new(.{ 0.0, -0.5, 0.0 }),
@@ -829,40 +829,126 @@ const Application = struct {
     }
 
     fn createVertexBuffer(self: *Self) !void {
-        const buffer_info = vk.BufferCreateInfo{
-            .size = @sizeOf(@TypeOf(buffer)),
-            .usage = .{
+        const size = @sizeOf(@TypeOf(static_buffer_data));
+
+        const buffer_creation_staging = try self.createBuffer(
+            size,
+            .{
+                .transfer_src_bit = true,
+            },
+            .{
+                .host_visible_bit = true,
+                .host_coherent_bit = true,
+            },
+        );
+
+        {
+            const data = try self.vkd.mapMemory(self.device, buffer_creation_staging.buffer_memory, 0, size, .{});
+            defer self.vkd.unmapMemory(self.device, buffer_creation_staging.buffer_memory);
+            @memcpy(
+                @as(
+                    [*]@TypeOf(static_buffer_data[0]),
+                    @ptrCast(@alignCast(data)),
+                ),
+                &static_buffer_data,
+            );
+        }
+
+        const buffer_creation_vertex = try self.createBuffer(
+            size,
+            .{
+                .transfer_dst_bit = true,
                 .vertex_buffer_bit = true,
             },
+            .{
+                .device_local_bit = true,
+            },
+        );
+        self.vertex_buffer = buffer_creation_vertex.buffer;
+        self.vertex_buffer_memory = buffer_creation_vertex.buffer_memory;
+
+        try self.copyBuffer(buffer_creation_staging.buffer, buffer_creation_vertex.buffer, size);
+
+        self.vkd.destroyBuffer(self.device, buffer_creation_staging.buffer, null);
+        self.vkd.freeMemory(self.device, buffer_creation_staging.buffer_memory, null);
+    }
+    fn copyBuffer(self: *Self, src_buffer: vk.Buffer, dst_buffer: vk.Buffer, size: vk.DeviceSize) !void {
+        var command_buffer: vk.CommandBuffer = .null_handle;
+        try self.vkd.allocateCommandBuffers(
+            self.device,
+            &.{
+                .command_pool = self.command_pool,
+                .level = .primary,
+                .command_buffer_count = 1,
+            },
+            (&command_buffer)[0..1],
+        );
+        defer self.vkd.freeCommandBuffers(self.device, self.command_pool, 1, (&command_buffer)[0..1]);
+
+        {
+            //const p_begin_info: *const vk.CommandBufferBeginInfo = &.{ .flags = .{ .one_time_submit_bit = true } };
+            try self.vkd.beginCommandBuffer(
+                command_buffer,
+                &.{ .flags = .{ .one_time_submit_bit = true } },
+            );
+            const p_regions = [1]vk.BufferCopy{.{
+                .src_offset = 0,
+                .dst_offset = 0,
+                .size = size,
+            }};
+            self.vkd.cmdCopyBuffer(
+                command_buffer,
+                src_buffer,
+                dst_buffer,
+                1,
+                &p_regions,
+            );
+            try self.vkd.endCommandBuffer(command_buffer);
+        }
+
+        const p_submit = [1]vk.SubmitInfo{.{
+            .command_buffer_count = 1,
+            .p_command_buffers = (&command_buffer)[0..1],
+        }};
+        try self.vkd.queueSubmit(
+            self.graphics_queue,
+            1,
+            &p_submit,
+            .null_handle,
+        );
+        try self.vkd.queueWaitIdle(self.graphics_queue);
+    }
+    fn createBuffer(
+        self: *Self,
+        size: vk.DeviceSize,
+        usage: vk.BufferUsageFlags,
+        properties: vk.MemoryPropertyFlags,
+    ) !struct {
+        buffer: vk.Buffer,
+        buffer_memory: vk.DeviceMemory,
+    } {
+        const buffer_info = vk.BufferCreateInfo{
+            .size = size,
+            .usage = usage,
             .sharing_mode = .exclusive,
         };
+        const buffer = try self.vkd.createBuffer(self.device, &buffer_info, null);
 
-        self.vertex_buffer = try self.vkd.createBuffer(self.device, &buffer_info, null);
-
-        const mem_requirements = self.vkd.getBufferMemoryRequirements(self.device, self.vertex_buffer);
+        const mem_requirements = self.vkd.getBufferMemoryRequirements(self.device, buffer);
 
         const alloc_info = vk.MemoryAllocateInfo{
             .allocation_size = mem_requirements.size,
-            .memory_type_index = try findMemoryType(self, mem_requirements.memory_type_bits, .{
-                .host_visible_bit = true,
-                .host_coherent_bit = true,
-            }),
+            .memory_type_index = try findMemoryType(self, mem_requirements.memory_type_bits, properties),
         };
 
-        self.vertex_buffer_memory = try self.vkd.allocateMemory(self.device, &alloc_info, null);
-        try self.vkd.bindBufferMemory(self.device, self.vertex_buffer, self.vertex_buffer_memory, 0);
+        const buffer_memory = try self.vkd.allocateMemory(self.device, &alloc_info, null);
 
-        {
-            const data = try self.vkd.mapMemory(self.device, self.vertex_buffer_memory, 0, buffer_info.size, .{});
-            defer self.vkd.unmapMemory(self.device, self.vertex_buffer_memory);
-            @memcpy(
-                @as(
-                    [*]@TypeOf(buffer[0]),
-                    @ptrCast(@alignCast(data)),
-                ),
-                &buffer,
-            );
-        }
+        try self.vkd.bindBufferMemory(self.device, buffer, buffer_memory, 0);
+
+        return .{
+            .buffer = buffer,
+            .buffer_memory = buffer_memory,
+        };
     }
     fn findMemoryType(self: *Self, type_filter: u32, props: vk.MemoryPropertyFlags) !u32 {
         const mem_props = self.vki.getPhysicalDeviceMemoryProperties(self.physical_device);
@@ -933,7 +1019,7 @@ const Application = struct {
             }};
             self.vkd.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
 
-            self.vkd.cmdDraw(command_buffer, @intCast(buffer.len), 1, 0, 0);
+            self.vkd.cmdDraw(command_buffer, @intCast(static_buffer_data.len), 1, 0, 0);
         }
         self.vkd.cmdEndRenderPass(command_buffer);
 
@@ -1089,7 +1175,7 @@ const Application = struct {
         // déb vk buffer_memory
         assert(self.vertex_buffer_memory != .null_handle);
         self.vkd.freeMemory(self.device, self.vertex_buffer_memory, null);
-        self.vertex_buffer = .null_handle;
+        self.vertex_buffer_memory = .null_handle;
         // fin vk buffer_memory
 
         //déb vk logical devices
