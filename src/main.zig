@@ -101,20 +101,30 @@ const Vertex = struct {
     };
 };
 
-const static_buffer_data = retour: {
+const vertex_buffer_data = retour: {
     break :retour [_]Vertex{
         .{
-            .position = .new(.{ 0.0, -0.5, 0.0 }),
+            .position = .new(.{ -0.5, -0.5, 0.0 }),
             .couleur = .new(.{ 1.0, 0.0, 0.0 }),
         },
         .{
-            .position = .new(.{ 0.5, 0.5, 0.0 }),
+            .position = .new(.{ 0.5, -0.5, 0.0 }),
             .couleur = .new(.{ 0.0, 1.0, 0.0 }),
         },
         .{
             .position = .new(.{ -0.5, 0.5, 0.0 }),
             .couleur = .new(.{ 0.0, 0.0, 1.0 }),
         },
+        .{
+            .position = .new(.{ 0.5, 0.5, 0.0 }),
+            .couleur = .new(.{ 0.0, 1.0, 1.0 }),
+        },
+    };
+};
+const index_buffer_data = retour: {
+    break :retour [_]u32{
+        0, 1, 2,
+        2, 1, 3,
     };
 };
 
@@ -152,6 +162,8 @@ const Application = struct {
 
     vertex_buffer: vk.Buffer = .null_handle,
     vertex_buffer_memory: vk.DeviceMemory = .null_handle,
+    index_buffer: vk.Buffer = .null_handle,
+    index_buffer_memory: vk.DeviceMemory = .null_handle,
 
     command_pool: vk.CommandPool = .null_handle,
     command_buffers: std.ArrayList(vk.CommandBuffer) = .empty,
@@ -703,7 +715,7 @@ const Application = struct {
             .depth_clamp_enable = .false,
             .rasterizer_discard_enable = .false,
             .polygon_mode = .fill,
-            .cull_mode = .{ .back_bit = true },
+            .cull_mode = .{ .back_bit = true, .front_bit = false },
             .front_face = .clockwise,
             .depth_bias_enable = .false,
             .depth_bias_constant_factor = 0,
@@ -829,7 +841,7 @@ const Application = struct {
     }
 
     fn createVertexBuffer(self: *Self) !void {
-        const size = @sizeOf(@TypeOf(static_buffer_data));
+        const size = @sizeOf(@TypeOf(vertex_buffer_data));
 
         const buffer_creation_staging = try self.createBuffer(
             size,
@@ -847,10 +859,10 @@ const Application = struct {
             defer self.vkd.unmapMemory(self.device, buffer_creation_staging.buffer_memory);
             @memcpy(
                 @as(
-                    [*]@TypeOf(static_buffer_data[0]),
+                    [*]@TypeOf(vertex_buffer_data[0]),
                     @ptrCast(@alignCast(data)),
                 ),
-                &static_buffer_data,
+                &vertex_buffer_data,
             );
         }
 
@@ -868,6 +880,50 @@ const Application = struct {
         self.vertex_buffer_memory = buffer_creation_vertex.buffer_memory;
 
         try self.copyBuffer(buffer_creation_staging.buffer, buffer_creation_vertex.buffer, size);
+
+        self.vkd.destroyBuffer(self.device, buffer_creation_staging.buffer, null);
+        self.vkd.freeMemory(self.device, buffer_creation_staging.buffer_memory, null);
+    }
+    fn createIndexBuffer(self: *Self) !void {
+        const size = @sizeOf(@TypeOf(index_buffer_data));
+
+        const buffer_creation_staging = try self.createBuffer(
+            size,
+            .{
+                .transfer_src_bit = true,
+            },
+            .{
+                .host_visible_bit = true,
+                .host_coherent_bit = true,
+            },
+        );
+
+        {
+            const data = try self.vkd.mapMemory(self.device, buffer_creation_staging.buffer_memory, 0, size, .{});
+            defer self.vkd.unmapMemory(self.device, buffer_creation_staging.buffer_memory);
+            @memcpy(
+                @as(
+                    [*]@TypeOf(index_buffer_data[0]),
+                    @ptrCast(@alignCast(data)),
+                ),
+                &index_buffer_data,
+            );
+        }
+
+        const buffer_creation_index = try self.createBuffer(
+            size,
+            .{
+                .transfer_dst_bit = true,
+                .index_buffer_bit = true,
+            },
+            .{
+                .device_local_bit = true,
+            },
+        );
+        self.index_buffer = buffer_creation_index.buffer;
+        self.index_buffer_memory = buffer_creation_index.buffer_memory;
+
+        try self.copyBuffer(buffer_creation_staging.buffer, buffer_creation_index.buffer, size);
 
         self.vkd.destroyBuffer(self.device, buffer_creation_staging.buffer, null);
         self.vkd.freeMemory(self.device, buffer_creation_staging.buffer_memory, null);
@@ -1002,6 +1058,7 @@ const Application = struct {
             const vertex_buffers = [_]vk.Buffer{self.vertex_buffer};
             const offsets = [_]vk.DeviceSize{0};
             self.vkd.cmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffers, &offsets);
+            self.vkd.cmdBindIndexBuffer(command_buffer, self.index_buffer, 0, .uint32);
 
             const viewports = [_]vk.Viewport{.{
                 .x = 0,
@@ -1019,7 +1076,8 @@ const Application = struct {
             }};
             self.vkd.cmdSetScissor(command_buffer, 0, scissors.len, &scissors);
 
-            self.vkd.cmdDraw(command_buffer, @intCast(static_buffer_data.len), 1, 0, 0);
+            //self.vkd.cmdDraw(command_buffer, @intCast(vertex_buffer_data.len), 1, 0, 0);
+            self.vkd.cmdDrawIndexed(command_buffer, @intCast(index_buffer_data.len), 1, 0, 0, 0);
         }
         self.vkd.cmdEndRenderPass(command_buffer);
 
@@ -1124,6 +1182,7 @@ const Application = struct {
         try self.createFramebuffers();
         try self.createCommandPool();
         try self.createVertexBuffer();
+        try self.createIndexBuffer();
         try self.createCommandBuffers();
         try self.createSyncObjects();
     }
@@ -1165,6 +1224,18 @@ const Application = struct {
         self.vkd.destroyRenderPass(self.device, self.render_pass, null);
         self.render_pass = .null_handle;
         // fin vk render pass
+
+        // déb vk index buffer
+        assert(self.index_buffer != .null_handle);
+        self.vkd.destroyBuffer(self.device, self.index_buffer, null);
+        self.index_buffer = .null_handle;
+        // fin vk index buffer
+
+        // déb vk index buffer_memory
+        assert(self.index_buffer_memory != .null_handle);
+        self.vkd.freeMemory(self.device, self.index_buffer_memory, null);
+        self.index_buffer_memory = .null_handle;
+        // fin vk index buffer_memory
 
         // déb vk buffer
         assert(self.vertex_buffer != .null_handle);
