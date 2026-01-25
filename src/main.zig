@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vk = @import("vulkan");
-const glfw = @import("glfw.zig");
+const glfw = @import("glfw");
 const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
 const c = @cImport({
@@ -11,6 +11,22 @@ const c = @cImport({
 const assert = std.debug.assert;
 
 var gpa: std.mem.Allocator = undefined;
+
+fn sleep(ns: u64) void {
+    switch (builtin.os.tag) {
+        .linux => {
+            const ret = std.os.linux.nanosleep(&.{
+                .sec = @intCast(ns / std.time.ns_per_s),
+                .nsec = @intCast(ns % std.time.ns_per_s),
+            }, null);
+            if (ret != 0) @panic("sleep error");
+        },
+        .windows => {
+            std.os.windows.kernel32.SleepEx(ns / std.time.ns_per_ms, 0);
+        },
+        else => unreachable,
+    }
+}
 
 const Shader = struct {
     nom: [:0]const u8,
@@ -1375,7 +1391,7 @@ const Application = struct {
     }
 
     pub fn step(self: *Self) void {
-        std.Thread.sleep(std.time.ns_per_s / 60);
+        sleep(std.time.ns_per_s / 60);
 
         self.fenetre.swapBuffers();
 

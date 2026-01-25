@@ -32,9 +32,17 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        .glfw = .{
+            .url = "git+https://github.com/glfw/glfw.git#dbadda26835ec5089ef922e6c290bcf58cf12056",
+            .hash = "N-V-__8AACgKSgBZuDlGX9ua8dZkoUYmxa3ienGJRyNYw-Jl",
+        },
         .vulkan_zig = .{
-            .url = "git+https://github.com/Snektron/vulkan-zig.git#4b7b9a8b949f326d85d9eff5013f445fb95ffbab",
-            .hash = "vulkan-0.0.0-r7Ytx5BBAwCay_2JFZPIdfMhfu28r5znPs1-DXRmuMIk",
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#b939b08950ceb9a66eeb8aaa224603623afaf837",
+            .hash = "vulkan-0.0.0-r7Ytx71EAwCqWX1lykO2PploTKA-GHHmJUUuNyuaabPi",
+        },
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/v1.4.337.tar.gz",
+            .hash = "N-V-__8AAGSNKwJZiGFaqVB6IuAdH-9I--Ti1-0lJkIWsSBA",
         },
     },
     .paths = .{
