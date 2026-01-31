@@ -4,6 +4,7 @@ const vk = @import("vulkan");
 const glfw = @import("glfw");
 const terminal = @import("terminal.zig");
 const math = @import("maths.zig");
+const constants = @import("constantes.zig");
 const c = @cImport({
     @cDefine("GLFW_INCLUDE_VULKAN", {});
     @cInclude("GLFW/glfw3.h");
@@ -211,16 +212,12 @@ const Application = struct {
     }
     fn enumerateLayers(vkb: vk.BaseWrapper, allocator: std.mem.Allocator) !std.ArrayList(vk.LayerProperties) {
         const alloc_layers = try vkb.enumerateInstanceLayerPropertiesAlloc(allocator);
-        var list_layers = std.ArrayList(vk.LayerProperties).fromOwnedSlice(alloc_layers);
-        errdefer list_layers.deinit(allocator);
-        return list_layers;
+        return std.ArrayList(vk.LayerProperties).fromOwnedSlice(alloc_layers);
     }
 
     fn enumeratePhysicalDevices(self: *Self, allocator: std.mem.Allocator) !std.ArrayList(vk.PhysicalDevice) {
         const alloc_devices = try self.vki.enumeratePhysicalDevicesAlloc(self.instance, allocator);
-        var list_devices = std.ArrayList(vk.PhysicalDevice).fromOwnedSlice(alloc_devices);
-        errdefer list_devices.deinit(allocator);
-        return list_devices;
+        return std.ArrayList(vk.PhysicalDevice).fromOwnedSlice(alloc_devices);
     }
 
     fn debugCallback(
@@ -1147,11 +1144,11 @@ const Application = struct {
         self.vkb = vk.BaseWrapper.load(vk_proc);
 
         const app_info = vk.ApplicationInfo{
-            .p_application_name = "Afficheur 3D",
-            .application_version = @bitCast(vk.makeApiVersion(1, 0, 0, 0)),
+            .p_application_name = constants.nom_application,
+            .application_version = constants.version,
             .p_engine_name = null,
             .engine_version = 0,
-            .api_version = @bitCast(vk.API_VERSION_1_2),
+            .api_version = @bitCast(vk.API_VERSION_1_3),
         };
 
         var extensions = try getRequiredExtensions(self._arena.allocator());
@@ -1363,7 +1360,7 @@ const Application = struct {
             in_flight_fence,
         );
 
-        const result_present = self.vkd.queuePresentKHR(self.present_queue, &.{
+        const result_present = self.vkd.queuePresentKHR(self.graphics_queue, &.{
             .wait_semaphore_count = signal_semaphores.len,
             .p_wait_semaphores = &signal_semaphores,
             .swapchain_count = 1,
@@ -1412,7 +1409,7 @@ const Application = struct {
     }
 };
 
-pub fn main() !void {
+fn runApp() !void {
     var gpa_debug = std.heap.DebugAllocator(.{
         //.verbose_log = true,
         .safety = if (builtin.mode == .Debug) true,
@@ -1439,4 +1436,340 @@ pub fn main() !void {
     //}
 
     try app.run();
+}
+
+const VulkanContext = struct {
+    _arena: std.heap.ArenaAllocator,
+
+    vk_proc: *const fn (instance: vk.Instance, procname: [*:0]const u8) callconv(.c) vk.PfnVoidFunction,
+    base: vk.BaseWrapper,
+
+    supported_extensions: []const vk.ExtensionProperties,
+    supported_layers: []const vk.LayerProperties,
+    required_extensions: [][*:0]const u8,
+    required_layers: [][*:0]const u8,
+
+    instance: vk.InstanceProxy,
+    instance_wrapper: vk.InstanceWrapper,
+    debug_messenger: ?vk.DebugUtilsMessengerEXT,
+    surface: vk.SurfaceKHR,
+
+    physical_device: vk.PhysicalDevice,
+    queue_family: vk.QueueFamilyProperties,
+
+    device: vk.DeviceProxy,
+    device_wrapper: vk.DeviceWrapper,
+
+    pub const InitSettings = struct {
+        fenetre: *glfw.Window,
+        debug: bool,
+        //log_writer: ?*std.Io.Writer,
+    };
+
+    pub fn init(ctx: *VulkanContext, settings: InitSettings, allocator: std.mem.Allocator) !void {
+        var _arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer _arena.deinit();
+        const arena = _arena.allocator();
+
+        const vk_proc: *const fn (instance: vk.Instance, procname: [*:0]const u8) callconv(.c) vk.PfnVoidFunction = @ptrCast(&glfw.getInstanceProcAddress);
+        const base = vk.BaseWrapper.load(vk_proc);
+
+        const supported_extensions = base.enumerateInstanceExtensionPropertiesAlloc(null, arena) catch @panic("OOM");
+        const supported_layers = base.enumerateInstanceLayerPropertiesAlloc(arena) catch @panic("OOM");
+        const required_extensions = ret: {
+            const glfw_extensions = glfw.getRequiredInstanceExtensions() catch @panic("GLFW error");
+            var list = std.ArrayList([*:0]const u8).initCapacity(arena, glfw_extensions.len) catch @panic("OOM");
+            errdefer list.deinit(arena);
+
+            list.appendSlice(arena, glfw_extensions) catch @panic("OOM");
+
+            if (settings.debug)
+                list.append(arena, vk.extensions.ext_debug_utils.name) catch @panic("OOM");
+
+            list.shrinkAndFree(arena, list.items.len);
+            break :ret list.items;
+        };
+        boucle_extensions: for (required_extensions) |r_ex| {
+            for (supported_extensions) |s_ex| {
+                if (std.mem.eql(
+                    u8,
+                    std.mem.span(r_ex),
+                    std.mem.sliceTo(&s_ex.extension_name, 0),
+                )) continue :boucle_extensions;
+            }
+            std.debug.print("Extension insupportée : {s}\n", .{r_ex});
+            @panic("a");
+        }
+        const required_layers = ret: {
+            var list = std.ArrayList([*:0]const u8).initCapacity(arena, 0) catch @panic("OOM");
+            errdefer list.deinit(arena);
+
+            if (settings.debug)
+                list.append(arena, "VK_LAYER_KHRONOS_validation") catch @panic("OOM");
+
+            list.shrinkAndFree(arena, list.items.len);
+            break :ret list.items;
+        };
+        boucle_layers: for (required_layers) |r_la| {
+            for (supported_layers) |s_la| {
+                if (std.mem.eql(
+                    u8,
+                    std.mem.span(r_la),
+                    std.mem.sliceTo(&s_la.layer_name, 0),
+                )) continue :boucle_layers;
+            }
+            std.debug.print("Layer insupportée : {s}\n", .{r_la});
+            @panic("a");
+        }
+
+        const debug_create_info = vk.DebugUtilsMessengerCreateInfoEXT{
+            .flags = .{},
+            .message_severity = .{
+                .verbose_bit_ext = true,
+                .warning_bit_ext = true,
+                .error_bit_ext = true,
+            },
+            .message_type = .{
+                .general_bit_ext = true,
+                .validation_bit_ext = true,
+                .performance_bit_ext = true,
+            },
+            .pfn_user_callback = logCallback,
+            .p_user_data = null, //settings.log_writer,
+        };
+
+        const instance: struct {
+            handle: vk.Instance,
+            wrapper: vk.InstanceWrapper,
+        } = ret: {
+            const app_info = vk.ApplicationInfo{
+                .p_application_name = constants.nom_application,
+                .application_version = constants.version,
+                .p_engine_name = null,
+                .engine_version = 0,
+                .api_version = @bitCast(vk.API_VERSION_1_3),
+            };
+
+            const handle = try base.createInstance(&.{
+                .p_application_info = &app_info,
+                .enabled_layer_count = @intCast(required_layers.len),
+                .pp_enabled_layer_names = required_layers.ptr,
+                .enabled_extension_count = @intCast(required_extensions.len),
+                .pp_enabled_extension_names = required_extensions.ptr,
+                .p_next = if (settings.debug) &debug_create_info else null,
+            }, null);
+            break :ret .{
+                .handle = handle,
+                .wrapper = vk.InstanceWrapper.load(handle, vk_proc),
+            };
+        };
+
+        // Cette variable est invalidée à la fin de la fonction.
+        const tmp_instance = vk.InstanceProxy.init(instance.handle, &instance.wrapper);
+
+        const debug_messenger =
+            if (!settings.debug)
+                null
+            else
+                try tmp_instance.createDebugUtilsMessengerEXT(&debug_create_info, null);
+
+        const surface = try settings.fenetre.createSurface(instance.handle, null);
+
+        //// Physical devices
+
+        const physical_devices = try tmp_instance.enumeratePhysicalDevicesAlloc(arena);
+        const physical_device_et_queue_family: struct {
+            physical_device: vk.PhysicalDevice,
+            queue_family_index: u32,
+            queue_family: vk.QueueFamilyProperties,
+        } = ret: {
+            var device_choix: vk.PhysicalDevice = .null_handle;
+            var score_choix: u32 = 0;
+            var queue_family_index: ?u32 = null;
+            var queue_family_choix: ?vk.QueueFamilyProperties = null;
+            physical_devices_loop: for (physical_devices) |device| {
+                var score: u32 = 0;
+                const props = tmp_instance.getPhysicalDeviceProperties(device);
+                switch (props.device_type) {
+                    .discrete_gpu => score += 10000,
+                    .integrated_gpu => score += 100,
+                    .cpu => score += 0,
+                    .virtual_gpu => score += 0,
+                    .other => score += 0,
+                    _ => {},
+                }
+
+                if (device_choix == .null_handle or score_choix < score) {
+                    const queue_families = try tmp_instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(device, arena);
+                    defer arena.free(queue_families);
+                    for (queue_families, 0..) |queue_family, i| {
+                        const graphics_bit = queue_family.queue_flags.graphics_bit;
+                        const present_support = try tmp_instance.getPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface);
+
+                        if (graphics_bit and present_support == .true) {
+                            device_choix = device;
+                            score_choix = score;
+                            queue_family_index = @intCast(i);
+                            queue_family_choix = queue_family;
+                            continue :physical_devices_loop;
+                        }
+                    }
+                }
+            }
+            if (device_choix != .null_handle and queue_family_choix != null and queue_family_choix != null) {
+                break :ret .{
+                    .physical_device = device_choix,
+                    .queue_family_index = queue_family_index.?,
+                    .queue_family = queue_family_choix.?,
+                };
+            } else {
+                @panic("aucun choix de physical device valide");
+            }
+        };
+        const physical_device = physical_device_et_queue_family.physical_device;
+        const queue_family = physical_device_et_queue_family.queue_family;
+
+        const device: struct {
+            handle: vk.Device,
+            wrapper: vk.DeviceWrapper,
+        } = ret: {
+            const queue_create_infos = [_]vk.DeviceQueueCreateInfo{.{
+                .queue_family_index = physical_device_et_queue_family.queue_family_index,
+                .queue_count = 1,
+                .p_queue_priorities = &.{1},
+            }};
+
+            const handle = try tmp_instance.createDevice(physical_device, &.{
+                .queue_create_info_count = @intCast(queue_create_infos.len),
+                .p_queue_create_infos = &queue_create_infos,
+
+                .enabled_extension_count = device_extensions.len,
+                .pp_enabled_extension_names = &device_extensions,
+            }, null);
+
+            break :ret .{
+                .handle = handle,
+                .wrapper = vk.DeviceWrapper.load(handle, tmp_instance.wrapper.dispatch.vkGetDeviceProcAddr.?),
+            };
+        };
+
+        // Cette variable est invalidée à la fin de la fonction.
+        //const tmp_device = vk.DeviceProxy.init(device.handle, &device.wrapper);
+
+        ctx.* = .{
+            ._arena = _arena,
+            .vk_proc = vk_proc,
+            .base = base,
+            .supported_extensions = supported_extensions,
+            .supported_layers = supported_layers,
+            .required_extensions = required_extensions,
+            .required_layers = required_layers,
+            .instance = .init(instance.handle, &ctx.*.instance_wrapper),
+            .instance_wrapper = instance.wrapper,
+            .debug_messenger = debug_messenger,
+            .surface = surface,
+            .physical_device = physical_device,
+            .queue_family = queue_family,
+            .device = .init(device.handle, &ctx.*.device_wrapper),
+            .device_wrapper = device.wrapper,
+        };
+    }
+
+    pub fn deinit(self: *VulkanContext) void {
+        defer self._arena.deinit();
+    }
+};
+
+fn logCallback(
+    message_severity: vk.DebugUtilsMessageSeverityFlagsEXT,
+    message_types: vk.DebugUtilsMessageTypeFlagsEXT,
+    p_callback_data: ?*const vk.DebugUtilsMessengerCallbackDataEXT,
+    _: ?*anyopaque,
+) callconv(vk.vulkan_call_conv) vk.Bool32 {
+    assert(p_callback_data != null);
+    //assert(log_writer_opaque != null);
+    //const log_writer: *std.Io.Writer = @ptrCast(@alignCast(log_writer_opaque));
+
+    const str_severity =
+        if (message_severity.error_bit_ext)
+            terminal.Color.red ++ "ERROR"
+        else if (message_severity.warning_bit_ext)
+            terminal.Color.yellow ++ "WARNING" //"\x1B[33mWARNING"
+        else if (message_severity.info_bit_ext)
+            terminal.Color.cyan ++ "INFO"
+        else if (message_severity.verbose_bit_ext)
+            "VERBOSE"
+        else
+            "[UNKNOWN SEVERITY]";
+    const str_type =
+        if (message_types.general_bit_ext)
+            "general"
+        else if (message_types.validation_bit_ext)
+            "validation"
+        else if (message_types.performance_bit_ext)
+            "performance"
+        else if (message_types.device_address_binding_bit_ext)
+            "device_address_binding"
+        else
+            "[UNKOWN TYPE]";
+
+    const str_message = (if (p_callback_data) |p|
+        p.p_message orelse null
+    else
+        null) orelse
+        "[???]";
+
+    std.debug.print(
+        // severity
+        terminal.Set.bold ++ terminal.Set.underline ++ "{s}" ++
+            // type
+            " {s}" ++ terminal.Reset.bold ++ terminal.Reset.underline ++
+            // message
+            "\n\t" ++ terminal.Set.italic ++ "{s}" ++ terminal.Reset.italic ++
+            // objets
+            "\n" ++ //terminal.Set.dim ++ "{s}" ++ terminal.Reset.dim ++
+            terminal.Color.default,
+        .{
+            str_severity,
+            str_type,
+            str_message,
+        },
+    );
+
+    if (message_severity.error_bit_ext) {
+        if (debug_vulkan) @breakpoint();
+    }
+
+    return vk.Bool32.false;
+}
+
+pub fn main() !void {
+    //return try runApp();
+    var gpa_debug = std.heap.DebugAllocator(.{
+        //.verbose_log = true,
+        .safety = if (builtin.mode == .Debug) true,
+    }).init;
+    defer if (builtin.mode == .Debug) assert(gpa_debug.deinit() == .ok);
+    gpa = gpa_debug.allocator();
+
+    if (glfw.init() == 0) {
+        @panic("GLFW error");
+    }
+
+    c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
+    c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_TRUE);
+    const fenetre = glfw.Window.create(200, 200, "allo", null, null) catch {
+        @panic("fenetre invalide");
+    };
+
+    //var stdout_buffer: [1024]u8 = undefined;
+    //var stdout_writer = std.Io.File.stdout().writer(, &stdout_buffer);
+    //const stdout: *std.Io.Writer = &stdout_writer.interface;
+    var ctx: VulkanContext = undefined;
+    try ctx.init(.{
+        .debug = true,
+        .fenetre = fenetre,
+        //.log_writer = stdout,
+    }, gpa);
+    ctx.deinit();
 }
