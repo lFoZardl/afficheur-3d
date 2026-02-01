@@ -1450,15 +1450,20 @@ const VulkanContext = struct {
     required_layers: [][*:0]const u8,
 
     instance: vk.InstanceProxy,
-    instance_wrapper: vk.InstanceWrapper,
-    debug_messenger: ?vk.DebugUtilsMessengerEXT,
+    debug_messenger: vk.DebugUtilsMessengerEXT,
     surface: vk.SurfaceKHR,
 
     physical_device: vk.PhysicalDevice,
-    queue_family: vk.QueueFamilyProperties,
+    queue_family: QueueFamily,
 
     device: vk.DeviceProxy,
-    device_wrapper: vk.DeviceWrapper,
+
+    swap_chain: SwapChain,
+
+    const QueueFamily = struct {
+        index: u32,
+        properties: vk.QueueFamilyProperties,
+    };
 
     pub const InitSettings = struct {
         fenetre: *glfw.Window,
@@ -1538,10 +1543,7 @@ const VulkanContext = struct {
             .p_user_data = null, //settings.log_writer,
         };
 
-        const instance: struct {
-            handle: vk.Instance,
-            wrapper: vk.InstanceWrapper,
-        } = ret: {
+        const instance: vk.InstanceProxy = ret: {
             const app_info = vk.ApplicationInfo{
                 .p_application_name = constants.nom_application,
                 .application_version = constants.version,
@@ -1558,38 +1560,34 @@ const VulkanContext = struct {
                 .pp_enabled_extension_names = required_extensions.ptr,
                 .p_next = if (settings.debug) &debug_create_info else null,
             }, null);
-            break :ret .{
-                .handle = handle,
-                .wrapper = vk.InstanceWrapper.load(handle, vk_proc),
-            };
+            const wrapper = arena.create(vk.InstanceWrapper) catch @panic("OOM");
+            wrapper.* = .load(handle, vk_proc);
+            break :ret .init(handle, wrapper);
         };
-
-        // Cette variable est invalidée à la fin de la fonction.
-        const tmp_instance = vk.InstanceProxy.init(instance.handle, &instance.wrapper);
 
         const debug_messenger =
             if (!settings.debug)
-                null
+                .null_handle
             else
-                try tmp_instance.createDebugUtilsMessengerEXT(&debug_create_info, null);
+                try instance.createDebugUtilsMessengerEXT(&debug_create_info, null);
 
         const surface = try settings.fenetre.createSurface(instance.handle, null);
 
         //// Physical devices
 
-        const physical_devices = try tmp_instance.enumeratePhysicalDevicesAlloc(arena);
         const physical_device_et_queue_family: struct {
             physical_device: vk.PhysicalDevice,
-            queue_family_index: u32,
-            queue_family: vk.QueueFamilyProperties,
+            queue_family: QueueFamily,
         } = ret: {
+            const physical_devices = try instance.enumeratePhysicalDevicesAlloc(arena);
+            defer arena.free(physical_devices);
             var device_choix: vk.PhysicalDevice = .null_handle;
             var score_choix: u32 = 0;
             var queue_family_index: ?u32 = null;
             var queue_family_choix: ?vk.QueueFamilyProperties = null;
             physical_devices_loop: for (physical_devices) |device| {
                 var score: u32 = 0;
-                const props = tmp_instance.getPhysicalDeviceProperties(device);
+                const props = instance.getPhysicalDeviceProperties(device);
                 switch (props.device_type) {
                     .discrete_gpu => score += 10000,
                     .integrated_gpu => score += 100,
@@ -1600,11 +1598,11 @@ const VulkanContext = struct {
                 }
 
                 if (device_choix == .null_handle or score_choix < score) {
-                    const queue_families = try tmp_instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(device, arena);
+                    const queue_families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(device, arena);
                     defer arena.free(queue_families);
                     for (queue_families, 0..) |queue_family, i| {
                         const graphics_bit = queue_family.queue_flags.graphics_bit;
-                        const present_support = try tmp_instance.getPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface);
+                        const present_support = try instance.getPhysicalDeviceSurfaceSupportKHR(device, @intCast(i), surface);
 
                         if (graphics_bit and present_support == .true) {
                             device_choix = device;
@@ -1619,8 +1617,10 @@ const VulkanContext = struct {
             if (device_choix != .null_handle and queue_family_choix != null and queue_family_choix != null) {
                 break :ret .{
                     .physical_device = device_choix,
-                    .queue_family_index = queue_family_index.?,
-                    .queue_family = queue_family_choix.?,
+                    .queue_family = .{
+                        .index = queue_family_index.?,
+                        .properties = queue_family_choix.?,
+                    },
                 };
             } else {
                 @panic("aucun choix de physical device valide");
@@ -1629,17 +1629,14 @@ const VulkanContext = struct {
         const physical_device = physical_device_et_queue_family.physical_device;
         const queue_family = physical_device_et_queue_family.queue_family;
 
-        const device: struct {
-            handle: vk.Device,
-            wrapper: vk.DeviceWrapper,
-        } = ret: {
+        const device: vk.DeviceProxy = ret: {
             const queue_create_infos = [_]vk.DeviceQueueCreateInfo{.{
-                .queue_family_index = physical_device_et_queue_family.queue_family_index,
+                .queue_family_index = physical_device_et_queue_family.queue_family.index,
                 .queue_count = 1,
                 .p_queue_priorities = &.{1},
             }};
 
-            const handle = try tmp_instance.createDevice(physical_device, &.{
+            const handle = try instance.createDevice(physical_device, &.{
                 .queue_create_info_count = @intCast(queue_create_infos.len),
                 .p_queue_create_infos = &queue_create_infos,
 
@@ -1647,14 +1644,26 @@ const VulkanContext = struct {
                 .pp_enabled_extension_names = &device_extensions,
             }, null);
 
+            const wrapper = arena.create(vk.DeviceWrapper) catch @panic("OOM");
+            wrapper.* = vk.DeviceWrapper.load(handle, instance.wrapper.dispatch.vkGetDeviceProcAddr.?);
+
+            break :ret .init(handle, wrapper);
+        };
+
+        const taille_fenetre: vk.Extent2D = ret: {
+            const framebuffer_size = settings.fenetre.getFramebufferSize();
             break :ret .{
-                .handle = handle,
-                .wrapper = vk.DeviceWrapper.load(handle, tmp_instance.wrapper.dispatch.vkGetDeviceProcAddr.?),
+                .height = @intCast(framebuffer_size.height),
+                .width = @intCast(framebuffer_size.width),
             };
         };
 
-        // Cette variable est invalidée à la fin de la fonction.
-        //const tmp_device = vk.DeviceProxy.init(device.handle, &device.wrapper);
+        const swap_chain = try SwapChain.init(.{
+            .instance = instance,
+            .physical_device = physical_device,
+            .device = device,
+            .surface = surface,
+        }, taille_fenetre, arena);
 
         ctx.* = .{
             ._arena = _arena,
@@ -1664,19 +1673,191 @@ const VulkanContext = struct {
             .supported_layers = supported_layers,
             .required_extensions = required_extensions,
             .required_layers = required_layers,
-            .instance = .init(instance.handle, &ctx.*.instance_wrapper),
-            .instance_wrapper = instance.wrapper,
+            .instance = instance,
             .debug_messenger = debug_messenger,
             .surface = surface,
             .physical_device = physical_device,
             .queue_family = queue_family,
-            .device = .init(device.handle, &ctx.*.device_wrapper),
-            .device_wrapper = device.wrapper,
+            .device = device,
+            .swap_chain = swap_chain,
         };
     }
 
     pub fn deinit(self: *VulkanContext) void {
-        defer self._arena.deinit();
+        self.swap_chain.deinit(self);
+
+        self.device.destroyDevice(null);
+        self.device.handle = .null_handle;
+
+        self.instance.destroySurfaceKHR(self.surface, null);
+        self.surface = .null_handle;
+
+        if (debug_vulkan and self.debug_messenger != .null_handle) {
+            self.instance.destroyDebugUtilsMessengerEXT(self.debug_messenger, null);
+        }
+        self.debug_messenger = .null_handle;
+
+        self.instance.destroyInstance(null);
+        self.instance.handle = .null_handle;
+
+        self._arena.deinit();
+    }
+};
+
+const SwapChain = struct {
+    const max_in_flight = 4;
+
+    handle: vk.SwapchainKHR,
+    frame_active: u32,
+    nombre_frames: u32,
+
+    surface_format: vk.SurfaceFormatKHR,
+    extent: vk.Extent2D,
+
+    images: [max_in_flight]vk.Image,
+    image_views: [max_in_flight]vk.ImageView,
+
+    fn chooseSwapSurfaceFormat(formats: []const vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
+        assert(formats.len > 0);
+        for (formats) |available_format| {
+            if (available_format.format == .b8g8r8a8_srgb and available_format.color_space == .srgb_nonlinear_khr) {
+                return available_format;
+            }
+        }
+
+        return formats[0];
+    }
+    fn chooseSwapPresentMode(present_modes: []const vk.PresentModeKHR) vk.PresentModeKHR {
+        assert(present_modes.len > 0);
+        for (present_modes) |available_mode| {
+            if (available_mode == .mailbox_khr) {
+                return available_mode;
+            }
+        }
+
+        return present_modes[0];
+    }
+    fn chooseSwapExtent(taille_fenetre: vk.Extent2D, capabilities: vk.SurfaceCapabilitiesKHR) vk.Extent2D {
+        if (capabilities.current_extent.width != 0xFFFF_FFFF) { // TODO: Pourquoi j'ai écrit ça donc?
+            return capabilities.current_extent;
+        } else {
+            assert(taille_fenetre.width > 0);
+            assert(taille_fenetre.height > 0);
+
+            return vk.Extent2D{
+                .width = std.math.clamp(
+                    taille_fenetre.width,
+                    capabilities.min_image_extent.width,
+                    capabilities.max_image_extent.width,
+                ),
+                .height = std.math.clamp(
+                    taille_fenetre.height,
+                    capabilities.min_image_extent.height,
+                    capabilities.max_image_extent.height,
+                ),
+            };
+        }
+    }
+
+    fn init(
+        ctx: struct {
+            instance: vk.InstanceProxy,
+            physical_device: vk.PhysicalDevice,
+            device: vk.DeviceProxy,
+            surface: vk.SurfaceKHR,
+        },
+        taille_fenetre: vk.Extent2D,
+        allocator: std.mem.Allocator,
+    ) !SwapChain {
+        const surface_formats = try ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(ctx.physical_device, ctx.surface, allocator);
+        defer allocator.free(surface_formats);
+        const surface_present_modes = try ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(ctx.physical_device, ctx.surface, allocator);
+        defer allocator.free(surface_present_modes);
+        const capabilities = try ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, ctx.surface);
+
+        const surface_format = chooseSwapSurfaceFormat(surface_formats);
+        const present_mode = chooseSwapPresentMode(surface_present_modes);
+        const extent = chooseSwapExtent(taille_fenetre, capabilities);
+
+        if (max_in_flight < capabilities.min_image_count) @panic("SurfaceCapabilitiesKHR.min_image_count invalide");
+        // on préfère le plus petit nombre qui est plus grand que 1
+        const nb_image_ideal = 2;
+        // TODO: Vérifier à quel point un nombre de minImageCount suppérieur à 4 est commun.
+        // NOTE: On pourrait possiblement créer utilisant moins d'images que son nombre minimale. C'est à investiguer.
+        const nb_images =
+            if (nb_image_ideal <= capabilities.min_image_count)
+                capabilities.min_image_count
+            else if (capabilities.max_image_count != 0 and capabilities.max_image_count < nb_image_ideal)
+                capabilities.max_image_count
+            else
+                nb_image_ideal;
+
+        assert(nb_images <= max_frames_in_flight);
+
+        const sharing_mode = vk.SharingMode.exclusive; // NOTE: à changer si on utilise plusieurs queues
+
+        const swap_chain_handle = try ctx.device.createSwapchainKHR(&.{
+            .surface = ctx.surface,
+            .min_image_count = nb_images,
+            .image_format = surface_format.format,
+            .image_color_space = surface_format.color_space,
+            .image_extent = extent,
+            .image_array_layers = 1,
+            .image_usage = .{ .color_attachment_bit = true },
+            .image_sharing_mode = sharing_mode,
+            .pre_transform = capabilities.current_transform,
+            .composite_alpha = .{ .opaque_bit_khr = true },
+            .present_mode = present_mode,
+            .clipped = .true,
+        }, null);
+
+        const images = ret: {
+            var images_buffer: [max_in_flight]vk.Image = undefined;
+            var nb_images_tmp = nb_images;
+            const res = try ctx.device.getSwapchainImagesKHR(swap_chain_handle, &nb_images_tmp, &images_buffer);
+            assert(nb_images_tmp == nb_images);
+            if (res != .success) @panic("Erreur lors de la création de la swap chain");
+            break :ret images_buffer;
+        };
+
+        const image_views = ret: {
+            var image_views_tmp: [max_in_flight]vk.ImageView = undefined;
+            for (0..nb_images) |i| {
+                image_views_tmp[i] = try ctx.device.createImageView(&.{
+                    .image = images[i],
+                    .view_type = .@"2d",
+                    .format = surface_format.format,
+                    .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
+                    .subresource_range = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .base_mip_level = 0,
+                        .level_count = 1,
+                        .base_array_layer = 0,
+                        .layer_count = 1,
+                    },
+                }, null);
+            }
+            break :ret image_views_tmp;
+        };
+
+        return .{
+            .handle = swap_chain_handle,
+            .frame_active = 0,
+            .nombre_frames = nb_images,
+            .surface_format = surface_format,
+            .extent = extent,
+            .images = images,
+            .image_views = image_views,
+        };
+    }
+
+    pub fn deinit(self: *SwapChain, ctx: *const VulkanContext) void {
+        for (0..self.nombre_frames) |i| {
+            ctx.device.destroyImageView(self.image_views[i], null);
+            self.image_views[i] = .null_handle;
+        }
+        ctx.device.destroySwapchainKHR(self.handle, null);
+        self.handle = .null_handle;
     }
 };
 
