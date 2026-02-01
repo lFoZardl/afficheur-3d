@@ -1684,7 +1684,7 @@ const VulkanContext = struct {
     }
 
     pub fn deinit(self: *VulkanContext) void {
-        self.swap_chain.deinit(self);
+        self.swap_chain.deinit(self, self._arena.allocator());
 
         self.device.destroyDevice(null);
         self.device.handle = .null_handle;
@@ -1701,21 +1701,28 @@ const VulkanContext = struct {
         self.instance.handle = .null_handle;
 
         self._arena.deinit();
+        self.* = undefined;
     }
 };
 
 const SwapChain = struct {
-    const max_in_flight = 4;
+    const max_in_flight = 3;
+    // on préfère le plus petit nombre qui est plus grand que 2
+    const nb_images_ideal = 3;
 
     handle: vk.SwapchainKHR,
-    frame_active: u32,
-    nombre_frames: u32,
 
     surface_format: vk.SurfaceFormatKHR,
     extent: vk.Extent2D,
 
-    images: [max_in_flight]vk.Image,
-    image_views: [max_in_flight]vk.ImageView,
+    image_active: u32,
+    images: []vk.Image,
+    image_views: []vk.ImageView,
+    image_available_semaphores: []vk.Semaphore,
+    image_render_finished_semaphores: []vk.Semaphore,
+
+    frame_active: u32,
+    frames_in_flight_fences: []vk.Fence,
 
     fn chooseSwapSurfaceFormat(formats: []const vk.SurfaceFormatKHR) vk.SurfaceFormatKHR {
         assert(formats.len > 0);
@@ -1769,32 +1776,37 @@ const SwapChain = struct {
         taille_fenetre: vk.Extent2D,
         allocator: std.mem.Allocator,
     ) !SwapChain {
-        const surface_formats = try ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(ctx.physical_device, ctx.surface, allocator);
-        defer allocator.free(surface_formats);
-        const surface_present_modes = try ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(ctx.physical_device, ctx.surface, allocator);
-        defer allocator.free(surface_present_modes);
         const capabilities = try ctx.instance.getPhysicalDeviceSurfaceCapabilitiesKHR(ctx.physical_device, ctx.surface);
 
-        const surface_format = chooseSwapSurfaceFormat(surface_formats);
-        const present_mode = chooseSwapPresentMode(surface_present_modes);
+        const surface_format = ret: {
+            const surface_formats = try ctx.instance.getPhysicalDeviceSurfaceFormatsAllocKHR(ctx.physical_device, ctx.surface, allocator);
+            defer allocator.free(surface_formats);
+            break :ret chooseSwapSurfaceFormat(surface_formats);
+        };
+        const present_mode = ret: {
+            const surface_present_modes = try ctx.instance.getPhysicalDeviceSurfacePresentModesAllocKHR(ctx.physical_device, ctx.surface, allocator);
+            defer allocator.free(surface_present_modes);
+            break :ret chooseSwapPresentMode(surface_present_modes);
+        };
         const extent = chooseSwapExtent(taille_fenetre, capabilities);
 
-        if (max_in_flight < capabilities.min_image_count) @panic("SurfaceCapabilitiesKHR.min_image_count invalide");
-        // on préfère le plus petit nombre qui est plus grand que 1
-        const nb_image_ideal = 2;
         // TODO: Vérifier à quel point un nombre de minImageCount suppérieur à 4 est commun.
         // NOTE: On pourrait possiblement créer utilisant moins d'images que son nombre minimale. C'est à investiguer.
         const nb_images =
-            if (nb_image_ideal <= capabilities.min_image_count)
+            if (nb_images_ideal <= capabilities.min_image_count)
                 capabilities.min_image_count
-            else if (capabilities.max_image_count != 0 and capabilities.max_image_count < nb_image_ideal)
+            else if (capabilities.max_image_count != 0 and capabilities.max_image_count < nb_images_ideal)
                 capabilities.max_image_count
             else
-                nb_image_ideal;
+                nb_images_ideal;
 
-        assert(nb_images <= max_frames_in_flight);
-
-        const sharing_mode = vk.SharingMode.exclusive; // NOTE: à changer si on utilise plusieurs queues
+        const nb_frames_in_flight: u32 =
+            if (3 < nb_images)
+                3
+            else if (1 < nb_images)
+                2
+            else
+                1;
 
         const swap_chain_handle = try ctx.device.createSwapchainKHR(&.{
             .surface = ctx.surface,
@@ -1804,7 +1816,7 @@ const SwapChain = struct {
             .image_extent = extent,
             .image_array_layers = 1,
             .image_usage = .{ .color_attachment_bit = true },
-            .image_sharing_mode = sharing_mode,
+            .image_sharing_mode = vk.SharingMode.exclusive, // NOTE: à changer si on utilise plusieurs queues
             .pre_transform = capabilities.current_transform,
             .composite_alpha = .{ .opaque_bit_khr = true },
             .present_mode = present_mode,
@@ -1812,19 +1824,22 @@ const SwapChain = struct {
         }, null);
 
         const images = ret: {
-            var images_buffer: [max_in_flight]vk.Image = undefined;
+            var images_buffer = allocator.alloc(vk.Image, nb_images) catch @panic("OOM");
+            errdefer allocator.free(images_buffer);
             var nb_images_tmp = nb_images;
-            const res = try ctx.device.getSwapchainImagesKHR(swap_chain_handle, &nb_images_tmp, &images_buffer);
-            assert(nb_images_tmp == nb_images);
+            const res = try ctx.device.getSwapchainImagesKHR(swap_chain_handle, &nb_images_tmp, images_buffer.ptr);
+            assert(nb_images_tmp == nb_images and nb_images == images_buffer.len);
             if (res != .success) @panic("Erreur lors de la création de la swap chain");
             break :ret images_buffer;
         };
+        errdefer allocator.free(images);
 
         const image_views = ret: {
-            var image_views_tmp: [max_in_flight]vk.ImageView = undefined;
-            for (0..nb_images) |i| {
-                image_views_tmp[i] = try ctx.device.createImageView(&.{
-                    .image = images[i],
+            const image_views_tmp = allocator.alloc(vk.ImageView, nb_images) catch @panic("OOM");
+            errdefer allocator.free(image_views_tmp);
+            for (image_views_tmp, images) |*image_view, image| {
+                image_view.* = try ctx.device.createImageView(&.{
+                    .image = image,
                     .view_type = .@"2d",
                     .format = surface_format.format,
                     .components = .{ .r = .identity, .g = .identity, .b = .identity, .a = .identity },
@@ -1839,25 +1854,72 @@ const SwapChain = struct {
             }
             break :ret image_views_tmp;
         };
+        errdefer allocator.free(image_views);
+
+        const image_available_semaphores = allocator.alloc(vk.Semaphore, nb_images) catch @panic("OOM");
+        const image_render_finished_semaphores = allocator.alloc(vk.Semaphore, nb_images) catch @panic("OOM");
+        const frames_in_flight_fences = allocator.alloc(vk.Fence, nb_frames_in_flight) catch @panic("OOM");
+
+        for (
+            image_available_semaphores,
+            image_render_finished_semaphores,
+        ) |*image_available_semaphore, *image_render_finished_semaphore| {
+            image_available_semaphore.* = try ctx.device.createSemaphore(&.{ .flags = .{} }, null);
+            image_render_finished_semaphore.* = try ctx.device.createSemaphore(&.{ .flags = .{} }, null);
+        }
+        for (
+            frames_in_flight_fences,
+        ) |*in_flight_fence| {
+            in_flight_fence.* = try ctx.device.createFence(&.{ .flags = .{ .signaled_bit = true } }, null);
+        }
 
         return .{
             .handle = swap_chain_handle,
-            .frame_active = 0,
-            .nombre_frames = nb_images,
             .surface_format = surface_format,
             .extent = extent,
+            .image_active = 0,
             .images = images,
             .image_views = image_views,
+            .image_available_semaphores = image_available_semaphores,
+            .image_render_finished_semaphores = image_render_finished_semaphores,
+            .frame_active = 0,
+            .frames_in_flight_fences = frames_in_flight_fences,
         };
     }
 
-    pub fn deinit(self: *SwapChain, ctx: *const VulkanContext) void {
-        for (0..self.nombre_frames) |i| {
-            ctx.device.destroyImageView(self.image_views[i], null);
-            self.image_views[i] = .null_handle;
+    pub fn deinit(self: *SwapChain, ctx: *const VulkanContext, allocator: std.mem.Allocator) void {
+        for (
+            self.images,
+            self.image_views,
+            self.image_available_semaphores,
+            self.image_render_finished_semaphores,
+        ) |
+            image,
+            image_view,
+            image_available_semaphore,
+            image_render_finished_semaphore,
+        | {
+            _ = image;
+            ctx.device.destroyImageView(image_view, null);
+            ctx.device.destroySemaphore(image_available_semaphore, null);
+            ctx.device.destroySemaphore(image_render_finished_semaphore, null);
         }
+
+        for (self.frames_in_flight_fences) |fence| {
+            ctx.device.destroyFence(fence, null);
+        }
+
         ctx.device.destroySwapchainKHR(self.handle, null);
         self.handle = .null_handle;
+
+        allocator.free(self.images);
+        allocator.free(self.image_views);
+        allocator.free(self.image_available_semaphores);
+        allocator.free(self.image_render_finished_semaphores);
+
+        allocator.free(self.frames_in_flight_fences);
+
+        self.* = undefined;
     }
 };
 
