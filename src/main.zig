@@ -1936,21 +1936,23 @@ pub fn main() !void {
     if (glfw.init() == 0) {
         @panic("GLFW error");
     }
+    defer glfw.terminate();
 
     c.glfwWindowHint(c.GLFW_CLIENT_API, c.GLFW_NO_API);
     c.glfwWindowHint(c.GLFW_RESIZABLE, c.GLFW_TRUE);
     const fenetre = glfw.Window.create(200, 200, "allo", null, null) catch {
         @panic("fenetre invalide");
     };
+    defer fenetre.destroy();
 
     //var stdout_buffer: [1024]u8 = undefined;
     //var stdout_writer = std.Io.File.stdout().writer(, &stdout_buffer);
     //const stdout: *std.Io.Writer = &stdout_writer.interface;
-    var ctx: VulkanContext = undefined;
-    try ctx.init(.{
+    var vulkan_context: VulkanContext = undefined;
+    try vulkan_context.init(.{
         .debug = true,
         .fenetre = fenetre,
         //.log_writer = stdout,
     }, gpa);
-    ctx.deinit();
+    defer vulkan_context.deinit();
 }
